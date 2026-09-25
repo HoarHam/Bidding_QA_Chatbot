@@ -1,0 +1,77 @@
+# ===========================
+# Python .gitignore 模板
+# ===========================
+
+# ---------- 字节码 / 编译产物 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- 分发 / 打包 ----------
+*.egg
+*.egg-info/
+*.egg-link/
+dist/
+build/
+sdist/
+*.whl
+*.tar.gz
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+.venv3/
+
+# ---------- 依赖锁定（可选，按需取消注释） ----------
+# Pipfile.lock
+# poetry.lock
+# pdm.lock
+
+# ---------- IDE / 编辑器 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ---------- 测试 / 覆盖率 ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+coverage.xml
+*.cover
+
+# ---------- Jupyter Notebook ----------
+.ipynb_checkpoints/
+
+# ---------- 类型检查 ----------
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# ---------- 环境变量 / 密钥 ----------
+.env
+.env.*
+!.env.example
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 数据库 / 本地存储 ----------
+*.sqlite3
+*.db
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
