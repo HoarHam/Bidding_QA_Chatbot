@@ -1,10 +1,51 @@
 [project]
 name = "bidding-qa-chatbot"
 version = "0.1.0"
-description = "Add your description here"
+description = "招投标智能问答机器人 — 第一阶段 RAG"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+# 锁 3.12：.python-version 与本地已装 torch/transformers 轮子都只覆盖 3.12。
+# 放宽到 >=3.12 会让 uv 为 3.13/3.14 也做解析，而这些 ML 轮子尚未提供。
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # --- Web 框架 (需求 3) ---
+    "fastapi>=0.141,<0.142",
+    "uvicorn[standard]>=0.38",
+    "pydantic>=2.13,<3",
+    "pydantic-settings>=2.15,<3",
+    # --- 配置 (需求 15) ---
+    "python-dotenv>=1.2,<2",
+    # --- HTTP 客户端 (需求 9) ---
+    # [http2] 是 qdrant-client 的传递要求，显式声明以免版本漂移
+    "httpx[http2]>=0.28.1,<0.29",
+    # --- LLM SDK (需求 4/5/6) ---
+    "zai-sdk>=0.2.3,<0.3",
+    # 刻意不升 3.x：openai 3.x 改用 httpx2 并不再依赖 httpx，
+    # 会导致 respx/pytest-httpx 无法拦截，mock 测试会静默打到线上付费 API。
+    "openai>=2.54,<3",
+    # --- 向量库 (需求 8) ---
+    "qdrant-client>=1.19.1,<1.20",
+    # --- 本地模型 (需求 6)：按用户指定精确锁定 ---
+    "torch==2.13.0",
+    "transformers==5.14.1",
+    "sentence-transformers==5.6.1",
+    "numpy>=2.1,<3",
+    # --- 稀疏检索 (需求 7) ---
+    "jieba>=0.42.1,<0.43",
+    # --- 数据处理 (需求 14) ---
+    "pandas>=3.0,<4",
+    "openpyxl>=3.1.5,<4",
+]
+
+[project.optional-dependencies]
+# ipykernel 仅本机分析语料时需要，不进生产依赖 (需求 14)
+notebook = ["ipykernel>=7.3,<8"]
+# 第二阶段才会安装；本阶段仅代码里有接口桩，不做真实连接
+phase2 = [
+    "neo4j>=5",
+    "sqlalchemy>=2",
+    "psycopg[binary]>=3",
+    "tavily-python>=0.5",
+]
 
 [project.scripts]
 bidding-qa-chatbot = "bidding_qa_chatbot:main"
@@ -12,3 +53,39 @@ bidding-qa-chatbot = "bidding_qa_chatbot:main"
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1,<10",
+    "pytest-asyncio>=1.4,<2",
+    "pytest-cov>=7,<8",
+    # respx 只在 openai<3 时可用（见上方注释）
+    "respx>=0.23.1,<0.24",
+    "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "model: 需要真实下载/加载本地模型（默认跳过，设 RUN_MODEL_TESTS=1 启用）",
+    "integration: 需要真实外部服务（Qdrant/Live LLM），CI 不跑",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.uv]
+# 环境中已设 UV_DEFAULT_INDEX 指向清华源，但该源目前对本站点返回 403
+# （"您目前无法访问此页面"），会导致依赖解析直接失败。
+# 这里固定一个实测可用（HTTP 200）的国内镜像，保证 uv sync 可复现。
+index-url = "https://mirrors.aliyun.com/pypi/simple/"

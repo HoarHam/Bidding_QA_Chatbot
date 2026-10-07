@@ -1,0 +1,110 @@
+# 阿里云云效 Flow 流水线（Codeup 代码库）。
+#
+# 为什么不是 .github/workflows/：本仓库的 origin 是 codeup.aliyuncs.com，
+# 不是 GitHub，GitHub Actions 在这里不会被触发。
+#
+# ⚠️ 文件路径说明：云效官方文档说明了 YAML 的**结构**（name/sources/stages/jobs/steps），
+# 但没有权威说明仓库内文件的**约定路径**。本文件放在 .workflow/ci.yml。
+# 若控制台要求固定路径，移动文件即可，内容是可移植的。
+# 创建方式：流水线 → YAML 化编排 → 空模板 → 流水线源指向本仓库 →
+# 流水线配置文件指向 .workflow/ci.yml。
+#
+# 这条流水线**不需要任何密钥**：测试全部离线（LLM 用 respx/假实现，
+# 向量库用 qdrant-client 的内存模式），因为 /data 与 .env 都不入库。
+
+name: bidding-qa-chatbot-ci
+
+sources:
+  - id: repo
+    type: codeup
+    name: Bidding_QA_Chatbot
+    branch: master
+    triggerEvents:
+      - push
+      - merge_request
+
+variables:
+  # 清华源在本网络下对本站返回 403，改用实测可用的阿里云镜像
+  UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple/
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+stages:
+  - id: verify
+    name: 校验
+    jobs:
+      - id: backend
+        name: 后端 · lint + 测试
+        runsOn: public/cn-beijing
+        steps:
+          - id: install-uv
+            step: Command
+            name: 安装 uv
+            with:
+              run: |
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+                echo "PATH=$HOME/.local/bin:$PATH" >> $ENV_FILE
+
+          - id: sync
+            step: Command
+            name: 同步依赖
+            with:
+              run: uv sync --locked --dev
+
+          - id: lint
+            step: Command
+            name: Ruff 检查
+            with:
+              run: |
+                uv run ruff check .
+                uv run ruff format --check .
+
+          - id: test
+            step: Command
+            name: Pytest
+            with:
+              run: uv run pytest -q
+
+      - id: frontend
+        name: 前端 · 类型检查 + 构建
+        runsOn: public/cn-beijing
+        steps:
+          - id: npm-install
+            step: Command
+            name: 安装依赖
+            with:
+              run: cd frontend && npm ci
+
+          - id: typecheck
+            step: Command
+            name: 类型检查
+            with:
+              run: cd frontend && npx tsc --noEmit
+
+          - id: build
+            step: Command
+            name: 构建
+            with:
+              run: cd frontend && npm run build
+
+  # 第一阶段没有部署目标，因此不假装有 CD。
+  # 这里只产出制品，真正的部署需要先确定目标（ECS / 容器服务 / 函数计算）。
+  - id: package
+    name: 打包（手动触发）
+    trigger: manual
+    jobs:
+      - id: build-artifacts
+        name: 构建制品
+        runsOn: public/cn-beijing
+        steps:
+          - id: uv-build
+            step: Command
+            name: 构建 Python wheel
+            with:
+              run: uv build
+
+          - id: next-build
+            step: Command
+            name: 构建前端产物
+            with:
+              run: cd frontend && npm ci && npm run build

@@ -75,3 +75,15 @@ logs/
 # ---------- 操作系统 ----------
 .DS_Store
 Thumbs.db
+
+# ---------- 本项目专属：不入远程仓库 ----------
+# 语料、抽取产物与本地笔记一律保留在本地
+/data/
+CLAUDE.md
+Prompt records.md
+
+# 前端
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local

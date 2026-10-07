@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/*
+ * Tailwind v4 是 CSS-first：主题令牌写在这里的 @theme 里，
+ * **不存在 tailwind.config.js**（v4 下生成那个文件不会有任何效果）。
+ */
+@theme {
+  --color-brand-50: oklch(0.97 0.014 254);
+  --color-brand-100: oklch(0.93 0.032 254);
+  --color-brand-500: oklch(0.62 0.16 254);
+  --color-brand-600: oklch(0.55 0.17 254);
+  --color-brand-700: oklch(0.48 0.16 254);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", sans-serif;
+}
+
+/* 聊天滚动条细一点，避免抢占视觉 */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: oklch(0.85 0 0);
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: oklch(0.75 0 0);
+}
