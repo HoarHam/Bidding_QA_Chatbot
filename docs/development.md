@@ -50,14 +50,14 @@ Windows Schannel 在吊销服务器不可达时报 `CRYPT_E_REVOCATION_OFFLINE`�
 
 ### 6. 包索引
 
-环境变量 `UV_DEFAULT_INDEX` 指向清华源，但该源目前对本站返回 **403**，
-会让依赖解析直接失败。项目在 `pyproject.toml` 的 `[tool.uv]` 里固定了
-实测可用的阿里云镜像；由于**环境变量优先级高于项目配置**，本机运行时需
-`env -u UV_DEFAULT_INDEX uv run ...`，或直接修正该环境变量：
+清华源对本站返回 **403**，会让依赖解析直接失败。现已改用阿里云镜像，两处保持一致：
 
-```powershell
-setx UV_DEFAULT_INDEX "https://mirrors.aliyun.com/pypi/simple/"
-```
+- 环境变量 `UV_DEFAULT_INDEX`（Windows 用户环境变量，改后需重开终端）
+- `pyproject.toml` 的 `[tool.uv].index-url`
+
+**环境变量优先级高于项目配置**，所以两处都要写对；另外注意**结尾斜杠**也要一致——
+只差一个斜杠就会让 `uv.lock` 在下一次解析时把每条依赖的 `source` 行都改写一遍
+（不影响功能，但会产生无意义的 diff）。
 
 ## 测试
 

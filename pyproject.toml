@@ -88,4 +88,4 @@ ignore = ["E501"]
 # 环境中已设 UV_DEFAULT_INDEX 指向清华源，但该源目前对本站点返回 403
 # （"您目前无法访问此页面"），会导致依赖解析直接失败。
 # 这里固定一个实测可用（HTTP 200）的国内镜像，保证 uv sync 可复现。
-index-url = "https://mirrors.aliyun.com/pypi/simple/"
+index-url = "https://mirrors.aliyun.com/pypi/simple"

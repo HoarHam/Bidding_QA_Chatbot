@@ -82,6 +82,11 @@ Thumbs.db
 CLAUDE.md
 Prompt records.md
 
+# 云效流水线配置：内容是在控制台直接粘贴的，仓库里的这份只是本地底稿。
+# 而且 sources.certificate.serviceConnection 是服务连接 UUID 字面值
+# （该字段在解析期就要确定，无法用控制台变量注入），入库等于公开内部标识。
+/.workflow/
+
 # 前端
 node_modules/
 frontend/.next/
