@@ -18,7 +18,7 @@ YAML 输入框。也就是说：
 
 改动流程是：改本地底稿 → 整份粘贴回控制台 → 保存。
 
-## 两个硬约束（实测踩过）
+## 三个硬约束（实测踩过）
 
 ### 1. `runsOn` 不能用简写
 
@@ -40,6 +40,42 @@ runsOn:
 无法向上回溯到 `sources` 层级。
 
 这也是本文件不入库的直接原因——UUID 写进仓库等于公开内部标识。
+
+### 3. 构建镜像是「裸」的，运行时都得自己装
+
+`alinux3:latest` 只是基础 Linux 镜像，**既没有 uv 也没有 Node.js**，
+而且 `$ENV_FILE` 变量在该镜像里**未定义**。两个具体后果：
+
+**① 不要用 `$ENV_FILE` 传递 PATH。**
+把 PATH 追加到 `$ENV_FILE` 会报 `$ENV_FILE: ambiguous redirect`（变量为空时
+shell 无法解析重定向目标）。改为**每个步骤各自 export**：
+
+```yaml
+sync:
+  step: Command
+  with:
+    run: |
+      export PATH="$HOME/.local/bin:$PATH"   # uv 装在 $HOME/.local/bin
+      uv sync --locked
+```
+
+注意 uv 与 Node 的差别：**uv 装到 `$HOME/.local/bin`（不在默认 PATH），
+NodeSource 装到 `/usr/bin`（已在默认 PATH）**。所以后端每一步都要 export PATH，
+前端安装后各步则不需要。
+
+**② Node 必须先装。**
+
+```yaml
+install_node:
+  step: Command
+  with:
+    run: |
+      curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+      dnf install -y nodejs
+      node --version && npm --version
+```
+
+不装就会在 `npm ci` 处报 `npm: command not found`。
 
 ## 流水线结构
 
