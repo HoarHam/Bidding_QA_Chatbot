@@ -47,9 +47,12 @@ export default function ChatShell() {
       setSources([]);
       setRetrieved(0);
       setSourcesPending(true);
+      // 只追加这两条新消息。**不要**把 history 也 spread 进来——
+      // history 取自当前 turns，是发给后端的对话上下文，不是要新增的 UI 项。
+      // 曾经写成 [...prev, ...history, ...]，结果每发一条消息整个会话就被复制一遍，
+      // React 立刻报 "Encountered two children with the same key"。
       setTurns((prev) => [
         ...prev,
-        ...history,
         { id: nextId(), role: "user", content: query },
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
