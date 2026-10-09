@@ -9,16 +9,18 @@ import type {
 } from "./types";
 
 /**
- * 服务端渲染时没有「当前源」，必须用绝对地址。
- * 浏览器端一律走相对路径（同源 + 代理）。
+ * 浏览器端一律走相对路径（同源，经 `app/api/[...path]/route.ts` 转发）。
+ *
+ * 服务端渲染时没有「当前源」，必须给绝对地址。这里**直接指向后端**而不是
+ * 绕回 Next 自身：后者会形成自请求（Next 请求自己再转发一次），
+ * 多一跳且在某些部署形态下可能挂住。
+ *
+ * 注意不要用 `API_PORT`——那是**后端**端口；早先误把它当前端端口用，
+ * 只是碰巧没出问题。
  */
 function baseUrl(): string {
   if (typeof window !== "undefined") return "";
-  const origin =
-    process.env.NEXT_PUBLIC_SITE_ORIGIN ??
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ??
-    `http://127.0.0.1:${process.env.API_PORT ?? 3000}`;
-  return origin;
+  return process.env.API_ORIGIN ?? "http://127.0.0.1:8001";
 }
 
 export async function fetchStats(): Promise<StatsResponse | null> {

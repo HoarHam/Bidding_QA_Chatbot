@@ -24,7 +24,12 @@ export default function MessageBubble({ turn }: { turn: ChatTurn }) {
   const isUser = turn.role === "user";
 
   return (
-    <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
+    <div
+      // 供 UI 验证脚本稳定选取（比按文本匹配可靠），见 scripts/verify-ui.mjs
+      data-role={turn.role}
+      data-streaming={turn.streaming ? "true" : "false"}
+      className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}
+    >
       <div
         className={`mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-full ${
           isUser ? "bg-slate-200 text-slate-600" : "bg-brand-500 text-white"

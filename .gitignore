@@ -94,3 +94,5 @@ frontend/out/
 frontend/.env.local
 # tsc 的增量编译缓存（构建产物，不该入库）
 frontend/tsconfig.tsbuildinfo
+# UI 验证脚本产出的截图
+frontend/ui-verify.png

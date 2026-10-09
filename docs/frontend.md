@@ -29,19 +29,39 @@ React 严格模式会双调用副作用，从 effect 里开流会导致同一条
 
 ## 开发代理
 
-```ts
-// next.config.ts
-rewrites: [{ source: "/api/:path*", destination: `${API_ORIGIN}/api/:path*` }]
-```
+`/api/*` 由**路由处理器** `app/api/[...path]/route.ts` 转发到后端。
+
+### 为什么不用 `next.config.ts` 的 `rewrites`
+
+`rewrites` 配置更短，但它**会缓冲 SSE 响应**——实测同一问题：
+
+| 路径 | token 帧数 | 首帧 | 末帧 | 跨度 |
+|---|---|---|---|---|
+| 直连后端 :8001 | 149 | 2894ms | — | **650ms** |
+| 经 `rewrites` 代理 | 44 | 2414ms | 2414ms | **0ms** |
+| 经 route handler | 312 | 2967ms | — | **1415ms** |
+
+`rewrites` 那一行 44 个帧**全部落在同一毫秒**：整个响应被缓冲后一次性吐出，
+用户看到的就是「答案憋到最后一次性蹦出来，思考过程和正文一起出现」。
+
+路由处理器把上游 `ReadableStream` **原样**交给 `Response`，
+不 await、不 concat、不 transform，字节到达即转发。
+
+**千万不要**在转发时写成 `await upstream.arrayBuffer()` 之类的缓冲式读取。
+`npm run verify:ui` 里有一条专门检查（「存在中间态样本」），
+已用负向测试确认它能抓到这种退化。
 
 保留 `/api` 前缀，前端所有请求都是相对路径，浏览器看来同源，**不需要 CORS**。
 
-注意 `.env` 里的 `API_HOST=0.0.0.0` 是**监听**地址，代理必须拨 `127.0.0.1`，
-所以配置项是独立的 `API_ORIGIN`（默认 `http://127.0.0.1:8001`）。
+注意 `.env` 里的 `API_HOST=0.0.0.0` 是**监听**地址，代理必须拨 `127.0.0.1`
+（`route.ts` 里的 `API_ORIGIN`，默认 `http://127.0.0.1:8001`）。
 
-**实测结论：SSE 能正常穿过 Next 的 rewrites 逐帧到达**（帧间隔约 130ms，
-不是一次性返回）。若将来升级 Next 后出现缓冲，改用 route handler 转发
-`upstream.body` 并加 `export const dynamic = "force-dynamic"` 即可。
+### Next 16 的两个坑
+
+1. **`params` 是 Promise**，必须 `await ctx.params`（旧版本是同步对象）。
+2. **`dynamic` / `revalidate` / `fetchCache` 段配置已被移除**
+   （启用 Cache Components 后），别再写 `export const dynamic = "force-dynamic"`。
+   `runtime` 默认就是 `nodejs`，`edge` 已废弃。
 
 ## SSE 消费
 
@@ -94,6 +114,33 @@ v4 是 **CSS-first**：
 
 `Composer` 用 `e.nativeEvent.isComposing` 判断组字状态：
 用中文输入法时回车是「选词确认」，不应该触发发送。
+
+## UI 冒烟验证（`npm run verify:ui`）
+
+```bash
+uv run bidding-qa-chatbot serve      # 终端 1
+cd frontend && npm run dev           # 终端 2
+cd frontend && npm run verify:ui     # 终端 3
+```
+
+用真实浏览器跑 9 项断言：模式切换、示例填入、Enter 发送、Shift+Enter 换行、
+发送按钮唯一性、**流式渲染**、以及控制台无 hydration/React 报错。
+
+**为什么必须用真浏览器**：本项目栽过两次，两次都是「服务端渲染正常、
+curl 和静态检查看不出问题」的故障——
+
+1. Next 16 拦截跨域开发资源 → 客户端 JS 不接管，**所有交互静默失效**；
+2. `rewrites` 缓冲 SSE → 答案**不再逐字出现**。
+
+这两类问题只有真浏览器能暴露。新增前端交互后请跑一遍。
+
+浏览器优先用系统自带 Edge/Chrome（`channel`），**不需要下载 Chromium**
+（国内网络下 `playwright install` 常常卡死）。都找不到时以退出码 2 结束，
+表示「跑不了」，与「跑失败」（退出码 1）区分开——CI 里据此决定是否跳过。
+
+流式检查的判据是「**是否存在中间态样本**」（长度既非 0 也非最终值），
+而不是采样间隔：token 生成本来就快、网络还会合并小包，
+用间隔判断会把正常的流式误判成缓冲。
 
 ## 类型同步
 

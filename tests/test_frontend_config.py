@@ -41,10 +41,41 @@ def test_allowed_dev_origins_covers_loopback_aliases():
     assert "127.0.0.1" in origins, f"allowedDevOrigins 未包含 127.0.0.1，实际为 {origins}"
 
 
-def test_api_rewrite_points_at_backend():
-    """开发代理：前端所有请求走 /api 相对路径，靠这条 rewrite 转发到后端。"""
+def test_proxy_is_route_handler_not_rewrite():
+    """代理必须用路由处理器，不能用 next.config 的 rewrites。
+
+    `rewrites` 会**缓冲 SSE**：实测同一问题经 rewrites 时 44 个 token 帧
+    全部落在同一毫秒（跨度 0ms），直连后端跨度 650ms。
+    表现就是答案不再逐字出现、思考过程和正文一起蹦出来。
+    """
     source = NEXT_CONFIG.read_text(encoding="utf-8")
-    assert "/api/:path*" in source, "缺少 /api 代理 rewrite"
+    assert "/api/:path*" not in source, (
+        "next.config.ts 里不该再有 /api 的 rewrites —— 它会缓冲 SSE，"
+        "代理请用 app/api/[...path]/route.ts"
+    )
+
+
+def test_proxy_route_handler_streams_and_does_not_buffer():
+    """代理必须原样透传上游 body，不得做缓冲式读取。"""
+    route = FRONTEND / "app" / "api" / "[...path]" / "route.ts"
+    assert route.exists(), "缺少代理路由处理器 app/api/[...path]/route.ts"
+    source = route.read_text(encoding="utf-8")
+
+    # 只看代码：注释里会把这些反模式写成反面教材，不能当成违规。
+    code = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+
+    assert "upstream.body" in code, "代理应直接把上游 ReadableStream 交给 Response"
+
+    for buffering in ("arrayBuffer", ".text()", "upstream.json"):
+        assert buffering not in code, (
+            f"代理里出现了缓冲式读取 `{buffering}` —— 会让流式退化成一次性显示"
+        )
+
+    # Next 16 破坏性变更：params 现在是 Promise
+    assert "await ctx.params" in source or "await params" in source, (
+        "Next 16 里 route handler 的 params 是 Promise，必须 await"
+    )
 
 
 def test_example_questions_are_real_text_not_placeholder():

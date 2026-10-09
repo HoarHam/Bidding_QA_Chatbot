@@ -1,16 +1,17 @@
 import type { NextConfig } from "next";
 
 /**
- * 开发代理：把 /api/* 转发到 Python 后端。
+ * 开发代理**不在这里**配置。
  *
- * 保留 `/api` 前缀，这样前端所有请求都是相对路径，浏览器看来是同源，
- * 不需要任何 CORS 配置。
+ * `/api/*` 由路由处理器 `app/api/[...path]/route.ts` 转发到后端。
+ * 曾经用这里的 `rewrites` 转发，但它会**缓冲 SSE 响应**——
+ * 实测经 rewrites 的 token 帧全部在同一毫秒到达（跨度 0ms），
+ * 直连后端跨度 511ms。表现就是答案不再流式、憋到最后一次性显示。
+ * 路由处理器把上游 ReadableStream 原样透传，不做缓冲，才能保住流式效果。
  *
- * 注意 `.env` 里的 `API_HOST=0.0.0.0` 是**监听**地址，代理必须拨 127.0.0.1
- * （localhost 会解析到它）。所以这里不使用 API_HOST。
+ * 注意 `.env` 里的 `API_HOST=0.0.0.0` 是**监听**地址，
+ * 代理必须拨 127.0.0.1（见 route.ts 的 API_ORIGIN）。
  */
-const API_ORIGIN = process.env.API_ORIGIN ?? "http://127.0.0.1:8001";
-
 const nextConfig: NextConfig = {
   // Next 16 默认拦截跨来源对开发资源（/_next/hmr 等）的请求，以防未授权访问。
   // 它只放行 localhost 及其子域、以及 dev server 启动时使用的主机名；
@@ -22,15 +23,6 @@ const nextConfig: NextConfig = {
   // node_modules/next/dist/docs/.../allowedDevOrigins.md）。
   // localhost 本就在默认放行列表内，这里显式列出只是为了表明意图。
   allowedDevOrigins: ["127.0.0.1", "localhost"],
-
-  async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${API_ORIGIN}/api/:path*`,
-      },
-    ];
-  },
 };
 
 export default nextConfig;
