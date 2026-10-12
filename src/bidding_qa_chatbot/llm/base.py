@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from bidding_qa_chatbot.log import redact
 
@@ -38,12 +38,61 @@ class Usage:
 
 
 @dataclass(slots=True)
-class ChatMessage:
-    role: Literal["system", "user", "assistant"]
-    content: str
+class ToolCall:
+    """模型请求调用某个工具。`arguments` 是模型给的**原始 JSON 字符串**，
+    可能不合法，解析失败要作为工具错误回灌给模型，而不是抛异常。"""
 
-    def to_dict(self) -> dict[str, str]:
-        return {"role": self.role, "content": self.content}
+    id: str
+    name: str
+    arguments: str = ""
+
+    def parsed_arguments(self) -> dict[str, Any]:
+        if not self.arguments.strip():
+            return {}
+        import json
+
+        try:
+            data = json.loads(self.arguments)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+
+@dataclass(slots=True)
+class ChatMessage:
+    """对话消息。
+
+    assistant 消息可以带 `tool_calls`；tool 消息用 `tool_call_id` 回指是哪次调用。
+    `reasoning_content` 只在 DeepSeek 上必须**原样回传**——
+    带 `tools` 的请求若丢掉它会被服务端拒绝（400）。
+    """
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str = ""
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
+    reasoning_content: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"role": self.role, "content": self.content}
+
+        if self.tool_calls:
+            out["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.name, "arguments": tc.arguments or "{}"},
+                }
+                for tc in self.tool_calls
+            ]
+            # DeepSeek 要求：带 tool_calls 的 assistant 消息必须回传 reasoning_content
+            if self.reasoning_content:
+                out["reasoning_content"] = self.reasoning_content
+
+        if self.tool_call_id:
+            out["tool_call_id"] = self.tool_call_id
+
+        return out
 
 
 @dataclass(slots=True)
@@ -57,12 +106,19 @@ class StreamEvent:
 @dataclass(slots=True)
 class StreamEnd:
     """流正常结束。携带收尾信息，否则 `finish_reason=length`（被截断）
-    和 token 用量就无从得知。"""
+    和 token 用量就无从得知。
+
+    工具调用也在这里交付：provider 在流式过程中把 tool_call 的分片
+    （id / name / arguments 是分批到达的）累积起来，结束时一次性给出。
+    这样上层不必关心分片拼装的细节。
+    """
 
     finish_reason: str
     usage: Usage | None = None
     provider: str | None = None
     model: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning: str | None = None
 
 
 @dataclass(slots=True)
@@ -71,6 +127,9 @@ class LLMRequest:
     mode: Mode = "fast"
     temperature: float | None = None
     max_tokens: int | None = None
+    #: OpenAI 风格的 function calling 声明。为空时不带该参数——
+    #: 有些模型/部署带空 tools 数组反而会报错。
+    tools: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -81,6 +140,7 @@ class LLMResult:
     usage: Usage | None
     provider: str
     model: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass(slots=True)

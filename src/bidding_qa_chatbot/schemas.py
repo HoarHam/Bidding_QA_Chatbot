@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -116,6 +116,25 @@ class ProviderEvent(BaseModel):
     model: str
     mode: Mode
     thinking_enabled: bool
+
+
+class ToolCallEvent(BaseModel):
+    """Agent 决定调用某个工具。前端据此显示「正在检索知识库…」。"""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    display: str
+
+
+class ToolResultEvent(BaseModel):
+    """工具执行完毕。`sources` 是结构化的引用来源，供参考来源面板展示。"""
+
+    name: str
+    ok: bool
+    elapsed_ms: int
+    summary: str
+    sources: list[SourceRef] = Field(default_factory=list)
+    degraded: bool = False
 
 
 class FallbackEvent(BaseModel):

@@ -242,10 +242,13 @@ class ProviderChain:
             )
 
             emitted = 0
+            end_event: StreamEnd | None = None
             try:
                 async for event in _prepend(first, stream):
                     if isinstance(event, StreamEvent):
                         emitted += 1
+                    elif isinstance(event, StreamEnd):
+                        end_event = event
                     yield event
             except Exception as exc:  # noqa: BLE001
                 error = _as_provider_error(provider.name, exc)
@@ -255,9 +258,11 @@ class ProviderChain:
             finally:
                 await _close(stream)
 
-            if emitted == 0:
-                # 只有 StreamEnd、没有任何 token：当作失败处理，但文本已无法撤回，
-                # 因此仍走 MidStreamError 语义（partial 但没有内容）。
+            # 「没产出内容」的判据不能只看文本 token：只返回 tool_calls、
+            # 正文为空的轮次是完全正常的（Agent 第一轮就是如此）。
+            # 早先只统计 StreamEvent，会把正常的工具调用轮判成失败。
+            has_tool_calls = bool(end_event and end_event.tool_calls)
+            if emitted == 0 and not has_tool_calls:
                 raise MidStreamError(provider.name, "provider 未产出任何内容", attempts)
             return
 

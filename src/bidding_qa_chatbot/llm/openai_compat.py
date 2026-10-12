@@ -32,6 +32,7 @@ from bidding_qa_chatbot.llm.base import (
     Stopwatch,
     StreamEnd,
     StreamEvent,
+    ToolCall,
     Usage,
 )
 from bidding_qa_chatbot.schemas import DepHealth
@@ -116,6 +117,11 @@ class OpenAICompatProvider:
         }
         thinking = req.mode == "thinking"
 
+        # 只在真的注册了工具时才带 tools：部分部署对空数组会直接报错。
+        if req.tools:
+            kwargs["tools"] = req.tools
+            kwargs["tool_choice"] = "auto"
+
         if self.thinking_style == "deepseek" and self.supports_thinking_toggle:
             # DeepSeek 默认**开启**思考；快速模式必须显式关掉，
             # 否则每次「快速」回答都要付推理延迟和费用。
@@ -146,6 +152,9 @@ class OpenAICompatProvider:
         emitted = 0
         usage: Usage | None = None
         finish_reason = "stop"
+        # tool_call 的分片是分批到达的：id 与 name 通常一次给全，arguments 是逐段拼的。
+        tool_buffer: dict[int, dict[str, str]] = {}
+        reasoning_parts: list[str] = []
 
         try:
             async for chunk in stream:
@@ -159,12 +168,26 @@ class OpenAICompatProvider:
                 # reasoning_content 不在类型签名里，只能 getattr 取。
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
+                    reasoning_parts.append(reasoning)
                     emitted += 1
                     yield StreamEvent(kind="reasoning", text=reasoning)
 
                 if delta.content:
                     emitted += 1
                     yield StreamEvent(kind="content", text=delta.content)
+
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    idx = getattr(tc, "index", 0) or 0
+                    entry = tool_buffer.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if getattr(tc, "id", None):
+                        entry["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        # name 一次性给全，赋值而非累加，避免个别实现重发导致重复
+                        if getattr(fn, "name", None) and not entry["name"]:
+                            entry["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            entry["arguments"] += fn.arguments
 
                 if chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
@@ -183,6 +206,12 @@ class OpenAICompatProvider:
             usage=usage,
             provider=self.name,
             model=self.model_for(req.mode),
+            tool_calls=[
+                ToolCall(id=e["id"] or f"call_{i}", name=e["name"], arguments=e["arguments"])
+                for i, e in sorted(tool_buffer.items())
+                if e["name"]
+            ],
+            reasoning="".join(reasoning_parts) or None,
         )
 
     # ------------------------------------------------------------ 一次性
@@ -202,6 +231,7 @@ class OpenAICompatProvider:
             usage=_to_usage(getattr(resp, "usage", None)),
             provider=self.name,
             model=self.model_for(req.mode),
+            tool_calls=_extract_tool_calls(message),
         )
 
     # ------------------------------------------------------------ 其他
@@ -237,6 +267,23 @@ class OpenAICompatProvider:
             with contextlib.suppress(Exception):
                 await self._client.close()
             self._client = None
+
+
+def _extract_tool_calls(message: Any) -> list[ToolCall]:
+    """从非流式响应的 message 里取出 tool_calls。"""
+    out: list[ToolCall] = []
+    for tc in getattr(message, "tool_calls", None) or []:
+        fn = getattr(tc, "function", None)
+        if fn is None:
+            continue
+        out.append(
+            ToolCall(
+                id=getattr(tc, "id", "") or f"call_{len(out)}",
+                name=getattr(fn, "name", "") or "",
+                arguments=getattr(fn, "arguments", "") or "",
+            )
+        )
+    return out
 
 
 def _to_usage(raw: Any) -> Usage | None:

@@ -6,7 +6,7 @@ import { BookOpen } from "lucide-react";
 import Composer from "./Composer";
 import MessageList from "./MessageList";
 import SourcesPanel from "./SourcesPanel";
-import type { ChatTurn } from "./MessageBubble";
+import type { ChatTurn, ToolActivity } from "./MessageBubble";
 import { streamChat } from "@/lib/api";
 import type { AttemptModel, Mode, SourceRef } from "@/lib/types";
 
@@ -63,6 +63,7 @@ export default function ChatShell() {
 
       let content = "";
       let reasoning = "";
+      let tools: ToolActivity[] = [];
 
       try {
         await streamChat(
@@ -90,6 +91,23 @@ export default function ChatShell() {
             onReasoning: (e) => {
               reasoning += e.delta;
               patchTurn(assistantId, { reasoning });
+            },
+            onToolCall: (e) => {
+              // Agent 决定检索。把过程显示出来——否则用户会以为界面卡住了
+              // （检索 + 二轮生成要好几秒）。
+              tools = [
+                ...tools,
+                { key: `tool-${tools.length}`, display: e.display, pending: true },
+              ];
+              patchTurn(assistantId, { tools });
+            },
+            onToolResult: (e) => {
+              tools = tools.map((t, i) =>
+                i === tools.length - 1
+                  ? { ...t, summary: e.summary, ok: e.ok, elapsedMs: e.elapsed_ms, pending: false }
+                  : t,
+              );
+              patchTurn(assistantId, { tools });
             },
             onToken: (e) => {
               content += e.delta;

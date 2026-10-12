@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     llm_breaker_open_seconds: int = 60
     stream_restart_on_failure: bool = False
 
+    # ---------- Agent ----------
+    # 关闭后回到「先固定检索、再生成」的老路径（少一次模型往返，但不具备
+    # 自主决定是否检索的能力）。保留这个开关是为了出问题时能一键退回。
+    agent_enabled: bool = True
+    # 工具调用轮数上限。达到上限的那一轮强制不带工具，逼模型作答，
+    # 避免模型反复检索、用户什么都拿不到。
+    agent_max_steps: int = 3
+
     # ---------- Qdrant (需求 8) ----------
     qdrant_url: str | None = None
     qdrant_api_key: SecretStr | None = None

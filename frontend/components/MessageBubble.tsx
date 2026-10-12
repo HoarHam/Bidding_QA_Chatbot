@@ -1,23 +1,69 @@
 "use client";
 
-import { Bot, User } from "lucide-react";
+import { AlertCircle, Bot, Loader2, Search, User } from "lucide-react";
 
 import ErrorBanner from "./ErrorBanner";
 import Markdown from "./Markdown";
 import ThinkingPanel from "./ThinkingPanel";
 import type { AttemptModel } from "@/lib/types";
 
+/** 一次工具调用及其结果，用于在回答上方展示「正在检索…」。 */
+export interface ToolActivity {
+  key: string;
+  display: string;
+  summary?: string;
+  ok?: boolean;
+  elapsedMs?: number;
+  pending?: boolean;
+}
+
 export interface ChatTurn {
   id: string;
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
+  tools?: ToolActivity[];
   streaming?: boolean;
   error?: { message: string; partial: boolean; attempts: AttemptModel[] };
   provider?: string | null;
   model?: string | null;
   fallbackFrom?: string | null;
   onRetry?: () => void;
+}
+
+/**
+ * 工具调用过程。
+ *
+ * 展示「模型正在做什么」——Agent 在给出答案前会先检索，这段过程如果完全不可见，
+ * 用户会以为界面卡住了。进行中的调用带转圈图标，完成后显示结果条数。
+ */
+function ToolActivityList({ items }: { items: ToolActivity[] }) {
+  if (!items.length) return null;
+  return (
+    <ul className="mb-2 space-y-1">
+      {items.map((t) => (
+        <li
+          key={t.key}
+          data-testid="tool-activity"
+          className="flex items-center gap-1.5 rounded-md bg-slate-50 px-2 py-1 text-[11px] text-slate-500"
+        >
+          {t.pending ? (
+            <Loader2 className="size-3 shrink-0 animate-spin text-brand-500" />
+          ) : t.ok ? (
+            <Search className="size-3 shrink-0 text-emerald-600" />
+          ) : (
+            <AlertCircle className="size-3 shrink-0 text-red-500" />
+          )}
+          <span className="truncate">{t.display}</span>
+          {t.summary && (
+            <span className={t.ok ? "ml-auto shrink-0 text-slate-400" : "ml-auto shrink-0 text-red-500"}>
+              {t.summary}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export default function MessageBubble({ turn }: { turn: ChatTurn }) {
@@ -49,9 +95,10 @@ export default function MessageBubble({ turn }: { turn: ChatTurn }) {
           ) : (
             <>
               <ThinkingPanel text={turn.reasoning ?? ""} streaming={Boolean(turn.streaming)} />
+              <ToolActivityList items={turn.tools ?? []} />
               {turn.content ? (
                 <Markdown content={turn.content} />
-              ) : turn.streaming ? (
+              ) : turn.streaming && !turn.tools?.length ? (
                 <span className="inline-block h-3.5 w-1.5 animate-pulse bg-slate-400 align-middle" />
               ) : null}
             </>

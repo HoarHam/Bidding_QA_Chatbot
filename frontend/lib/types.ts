@@ -132,6 +132,22 @@ export interface ProviderEvent {
   thinking_enabled: boolean;
 }
 
+/** Agent 决定调用某个工具。前端据此显示「正在检索知识库…」。 */
+export interface ToolCallEvent {
+  name: string;
+  arguments: Record<string, unknown>;
+  display: string;
+}
+
+export interface ToolResultEvent {
+  name: string;
+  ok: boolean;
+  elapsed_ms: number;
+  summary: string;
+  sources: SourceRef[];
+  degraded: boolean;
+}
+
 /** 线上字段是 `from` / `to`（后端用 serialization_alias 输出）。 */
 export interface FallbackEvent {
   from: string;

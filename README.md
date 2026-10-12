@@ -6,6 +6,9 @@
 用「稠密语义 + BM25 关键词」混合检索召回、CrossEncoder 精排，再交给可自动回退的大模型
 流式作答，并在界面上展示参考来源。
 
+**检索已注册为工具**：Agent 会根据问题自行判断是否需要查知识库——问招投标业务问题
+会先检索再作答并标注出处，闲聊则直接回答。检索过程在界面上可见。
+
 > 当前为第一阶段，只实现基础 RAG。第二阶段（Neo4j 知识图谱、PostgreSQL 会话记录、
 > Tavily / Exa 联网搜索）已在 `.env` 中预留配置并写好接口桩，尚未实现。
 
@@ -86,11 +89,12 @@ RUN_MODEL_TESTS=1 uv run pytest -m model
 ```mermaid
 flowchart LR
     UI["Next.js 前端<br/>App Router + Tailwind"] -->|"SSE"| API["FastAPI"]
-    API --> RET["混合检索<br/>dense + BM25 → RRF → 精排"]
+    API --> AG["Agent<br/>工具调用循环"]
+    AG -->|"search_bidding_knowledge"| RET["混合检索<br/>dense + BM25 → RRF → 精排"]
     RET --> QD[("Qdrant<br/>bid_qa")]
     RET --> EMB["bge-small-zh-v1.5<br/>512 维"]
     RET --> RRK["bge-reranker-base"]
-    API --> LLM["LLM 链<br/>deepseek → zhipu → vLLM"]
+    AG --> LLM["LLM 链<br/>deepseek → zhipu → vLLM"]
 ```
 
 | 层 | 技术 |

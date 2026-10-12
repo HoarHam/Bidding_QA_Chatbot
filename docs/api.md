@@ -27,7 +27,29 @@
 `mode` 取 `fast` 或 `thinking`。响应为 `text/event-stream`，使用**具名事件**
 （前端按事件名分发，不做字符串嗅探）。
 
-事件顺序：`sources` → (`provider` | `fallback`) → (`reasoning` | `token`)* → (`done` | `error`)
+**Agent 路径（默认）**的事件顺序：
+
+```
+tool_call → tool_result → sources → provider → (token | reasoning)* → done
+```
+
+模型认为不需要检索时（如闲聊），不会有 `tool_call` / `tool_result` / `sources`，
+直接 `provider → token* → done`。多轮检索时 `tool_call`/`tool_result`/`sources` 会重复出现。
+
+**老路径（`AGENT_ENABLED=false`）**：`sources → provider → token* → done`，
+来源在任何 token 之前发出。
+
+```
+event: tool_call
+data: {"name":"search_bidding_knowledge","arguments":{"query":"投标保证金 退还"},"display":"检索知识库：投标保证金 退还"}
+
+event: tool_result
+data: {"name":"search_bidding_knowledge","ok":true,"elapsed_ms":412,"summary":"检索到 5 条相关资料","sources":[...],"degraded":false}
+```
+
+`tool_call` / `tool_result` 是给人看的：检索加二轮生成要好几秒，
+界面没有反馈用户会以为卡住了。`sources` 随 `tool_result` 一并推出，
+参考来源面板据此填充。
 
 ```
 event: sources

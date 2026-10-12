@@ -15,6 +15,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI
@@ -42,6 +43,50 @@ def build_http_client(settings: Settings) -> httpx.AsyncClient:
         # 与 Qdrant 客户端保持一致：不走系统代理（本机代理连不通部分目标）。
         trust_env=settings.http_trust_env,
     )
+
+
+def build_agent(
+    settings: Settings,
+    chain: Any,
+    qdrant: Any,
+    encoder: Any,
+    reranker: Any,
+    bm25_artifact: Any,
+    collection_vocab_sha1: str | None,
+) -> Any:
+    """构造 Agent（未启用时返回 None）。
+
+    **刻意不检查 `encoder` 是否为 None。** Agent 路径与「本地模型是否就绪」
+    是两件正交的事：前者决定由谁判断要不要检索，后者只影响工具内部能不能跑。
+
+    模型缺失时正确的做法是让工具返回一条明确的失败信息（模型据此如实告知用户），
+    而不是切到固定检索路径——那条路径在缺 encoder 时是**直接 503** 的，
+    切过去只会把「部分可用」变成「完全不可用」。
+
+    抽成独立函数是为了可测：这条逻辑曾经写反过，且只在运行时才暴露。
+    """
+    if not settings.agent_enabled:
+        return None
+
+    from bidding_qa_chatbot.agent import RagAgent, build_default_registry
+    from bidding_qa_chatbot.retrieval.service import Retriever
+
+    # 检索器无请求态，启动时构造一次复用即可
+    retriever = Retriever(
+        qdrant,
+        encoder,
+        reranker,
+        settings,
+        bm25_artifact=bm25_artifact,
+        collection_vocab_sha1=collection_vocab_sha1,
+    )
+    agent = RagAgent(chain, build_default_registry(retriever, settings), settings)
+    logger.info("Agent 已启用，工具: %s", agent.registry.names)
+    if not retriever.available:
+        logger.warning(
+            "本地模型未就绪：Agent 仍可作答非检索类问题，但知识库检索工具会返回明确的不可用提示"
+        )
+    return agent
 
 
 @asynccontextmanager
@@ -82,6 +127,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from bidding_qa_chatbot.llm import build_chain
 
     app.state.chain = build_chain(settings)
+
+    # ---- Agent：把 RAG 检索注册成工具，由模型自行决定何时调用 ----
+    app.state.agent = build_agent(
+        settings,
+        app.state.chain,
+        app.state.qdrant,
+        app.state.encoder,
+        app.state.reranker,
+        app.state.bm25,
+        app.state.collection_vocab_sha1,
+    )
+
     app.state.settings = settings
 
     logger.info("服务就绪：provider 链 %s", " -> ".join(settings.fallback_chain))

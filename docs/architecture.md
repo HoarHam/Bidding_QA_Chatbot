@@ -11,6 +11,7 @@ flowchart LR
 
     subgraph server["Python 后端 (FastAPI)"]
         API["API 层<br/>/api/chat/stream · SSE"]
+        AG["Agent 层<br/>工具调用循环"]
         RET["检索层<br/>hybrid → RRF → rerank"]
         LLM["LLM 层<br/>provider 链 + 回退"]
     end
@@ -28,11 +29,12 @@ flowchart LR
     end
 
     UI -->|"POST /api/chat/stream"| API
-    API --> RET
+    API --> AG
+    AG -->|"工具：search_bidding_knowledge"| RET
     RET --> EMB
     RET --> QD
     RET --> RRK
-    API --> LLM
+    AG --> LLM
     LLM --> DS
     LLM -.降级.-> ZP
     LLM -.降级.-> VL
@@ -48,18 +50,25 @@ sequenceDiagram
     autonumber
     participant U as 浏览器
     participant A as FastAPI
+    participant AG as Agent
     participant R as 检索层
     participant Q as Qdrant
     participant L as LLM 链
 
     U->>A: POST /api/chat/stream
-    A->>R: retrieve(query)
-    R->>Q: Prefetch(dense) + Prefetch(sparse)
-    Q-->>R: RRF 融合候选
-    R->>R: CrossEncoder 精排
-    R-->>A: Top-K 来源
-    A-->>U: event: sources
-    A->>L: stream_with_fallback(req)
+    A->>AG: astream(messages, mode)
+    AG->>L: 带 tools 的请求
+    alt 模型认为需要检索
+        L-->>AG: tool_calls
+        AG-->>U: event: tool_call
+        AG->>R: 执行检索工具
+        R->>Q: Prefetch(dense) + Prefetch(sparse)
+        Q-->>R: RRF 融合候选
+        R->>R: CrossEncoder 精排
+        R-->>AG: Top-K
+        AG-->>U: event: tool_result + event: sources
+        AG->>L: 回灌工具结果，进入下一轮
+    end
     alt 主 provider 首个 token 前失败
         L->>L: 记录 Attempt，切换下一个 provider
         L-->>U: event: fallback
@@ -71,8 +80,14 @@ sequenceDiagram
     L-->>U: event: done
 ```
 
+> 老路径（`AGENT_ENABLED=false`）没有 Agent 与工具调用这两步：
+> 先固定检索、把资料塞进提示词，再直接生成。此时 `sources` 事件在
+> 任何 token 之前发出；Agent 路径下来源要等 `tool_result` 才出现。
+
 ## 为什么这样分层
 
+- **`agent/` 单独成层**：它编排「模型 ↔ 工具」的往返，不关心检索内部怎么实现，
+  也不关心用的是哪家 LLM。新增工具只碰 `agent/`，检索与模型两侧都不用动。
 - **`llm/`、`embeddings/`、`retrieval/` 分开放**：三者失败模式和伸缩性完全不同。
   LLM 挂了不该拖垮检索；检索也要能在「假编码器」下独立测试。
 - **`ingestion/` 与 `retrieval/` 分离**：入库是批处理 + CLI，检索是每请求异步，

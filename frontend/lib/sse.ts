@@ -18,6 +18,8 @@ import type {
   FallbackEvent,
   ProviderEvent,
   SourcesEvent,
+  ToolCallEvent,
+  ToolResultEvent,
 } from "./types";
 
 export type SSEHandler = {
@@ -26,6 +28,8 @@ export type SSEHandler = {
   onFallback?: (e: FallbackEvent) => void;
   onReasoning?: (e: DeltaEvent) => void;
   onToken?: (e: DeltaEvent) => void;
+  onToolCall?: (e: ToolCallEvent) => void;
+  onToolResult?: (e: ToolResultEvent) => void;
   onError?: (e: ErrorEvent) => void;
   onDone?: (e: DoneEvent) => void;
   /** HTTP 非 200 时收到的 JSON 错误体（不是 SSE）。 */
@@ -77,6 +81,12 @@ function dispatch(frame: Frame, handler: SSEHandler): void {
       break;
     case "reasoning":
       handler.onReasoning?.(payload as DeltaEvent);
+      break;
+    case "tool_call":
+      handler.onToolCall?.(payload as ToolCallEvent);
+      break;
+    case "tool_result":
+      handler.onToolResult?.(payload as ToolResultEvent);
       break;
     case "token":
       handler.onToken?.(payload as DeltaEvent);

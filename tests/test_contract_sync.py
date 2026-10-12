@@ -51,6 +51,8 @@ def test_frontend_types_mirror_backend_schemas():
         ("AttemptModel", schemas.AttemptModel),
         ("SourcesEvent", schemas.SourcesEvent),
         ("ProviderEvent", schemas.ProviderEvent),
+        ("ToolCallEvent", schemas.ToolCallEvent),
+        ("ToolResultEvent", schemas.ToolResultEvent),
         ("DeltaEvent", schemas.DeltaEvent),
         ("ErrorEvent", schemas.ErrorEvent),
         ("DoneEvent", schemas.DoneEvent),
@@ -105,6 +107,16 @@ def test_sse_event_names_match_documented_set():
     # 后端实际发送的事件名
     from bidding_qa_chatbot.api import sse
 
-    for event_name in ("sources", "provider", "fallback", "token", "reasoning", "error", "done"):
+    for event_name in (
+        "sources",
+        "provider",
+        "fallback",
+        "token",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "error",
+        "done",
+    ):
         frame = sse.encode_event(event_name, schemas.DeltaEvent(delta="x"))
         assert frame.startswith(f"event: {event_name}\n"), event_name

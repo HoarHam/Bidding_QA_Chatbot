@@ -251,6 +251,55 @@ async def test_health_is_liveness_only():
     assert resp.json() == {"status": "ok", "deps": []}
 
 
+def test_agent_built_even_when_local_models_missing():
+    """回归守卫：AGENT_ENABLED=true 时必须建 Agent，**不能因 encoder 缺失而跳过**。
+
+    这条逻辑曾经写反过：本地模型没就绪就不建 Agent，转而去走「固定检索路径」。
+    但那条路径在缺 encoder 时是直接 503 的——所谓「回退」实际是把
+    「部分可用」（模型仍能回答闲聊、并如实告知知识库不可用）变成了
+    「完全不可用」。两者是正交的：Agent 决定由谁判断要不要检索，
+    encoder 只影响工具内部能不能跑。
+    """
+    from bidding_qa_chatbot.api.app import build_agent
+
+    settings = _settings()
+    settings.agent_enabled = True
+
+    agent = build_agent(
+        settings,
+        chain=object(),
+        qdrant=object(),
+        encoder=None,  # 本地模型未就绪
+        reranker=None,
+        bm25_artifact=None,
+        collection_vocab_sha1=None,
+    )
+
+    assert agent is not None, "本地模型缺失不应阻止 Agent 建立"
+    assert "search_bidding_knowledge" in agent.registry.names
+    assert agent.registry.get("search_bidding_knowledge").retriever.available is False
+
+
+def test_agent_not_built_when_disabled():
+    from bidding_qa_chatbot.api.app import build_agent
+
+    settings = _settings()
+    settings.agent_enabled = False
+
+    assert (
+        build_agent(
+            settings,
+            chain=object(),
+            qdrant=object(),
+            encoder=object(),
+            reranker=None,
+            bm25_artifact=None,
+            collection_vocab_sha1=None,
+        )
+        is None
+    )
+
+
 def test_http_client_timeout_is_constructible():
     """回归守卫：`httpx.Timeout` 只给 connect/read 会抛 ValueError。
 

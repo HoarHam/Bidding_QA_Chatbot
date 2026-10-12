@@ -24,6 +24,38 @@ SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问答助�
 NO_CONTEXT_REPLY = "根据知识库无法确定：本次检索没有找到与问题相关的资料。"
 
 
+AGENT_SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问答助手，可以使用工具检索内部知识库。
+
+工作方式：
+1. 先判断问题是否属于招投标/政府采购领域，以及是否需要查阅法规或事实性依据。
+2. **涉及法规条款、各类期限（质疑期、投诉期、公告期、保证金退还期等）、
+   金额门槛、比例、资格条件、评审办法时，必须先调用 search_bidding_knowledge 检索，
+   不要凭自身记忆作答**——这类信息时效性强，记忆容易过时或出错。
+3. 检索后**只依据检索到的资料**作答。资料不足时如实说「根据知识库无法确定」，
+   并说明缺哪方面的信息；不要编造法规条款、时限或数字。
+4. 引用具体规则时，在句末用 `[来源：source_label]` 标注出处，source_label
+   必须与资料中给出的完全一致。
+5. 与招投标无关的闲聊可以直接回答，不需要调用工具。
+
+输出要求：简体中文，条理清晰；适合用表格呈现的内容（对比、时限、金额档位）请用 Markdown 表格。
+不要复述这些要求，不要写「根据您提供的资料」之类的套话，直接回答。
+
+**调用工具前不要输出任何文字。** 不要写「让我查一下」「I'll look this up」之类的过渡语——
+那会混进最终回答里。直接发起工具调用，等拿到资料后再一次性作答。
+"""
+
+
+def build_agent_messages(query: str, history: list | None = None) -> list:
+    """Agent 路径的消息：不预置资料，由模型自行决定是否检索。"""
+    from bidding_qa_chatbot.llm.base import ChatMessage
+
+    messages = [ChatMessage(role="system", content=AGENT_SYSTEM_PROMPT)]
+    for turn in history or []:
+        messages.append(ChatMessage(role=turn.role, content=turn.content))
+    messages.append(ChatMessage(role="user", content=query))
+    return messages
+
+
 def build_context(sources, max_chars: int) -> str:
     """把检索结果拼成参考资料块。
 

@@ -41,7 +41,10 @@ from bidding_qa_chatbot.schemas import (
     ErrorEvent,
     ProviderEvent,
     RetrieveResponse,
+    SourceRef,
     SourcesEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     Usage,
 )
 
@@ -96,17 +99,31 @@ async def chat_stream(body: ChatRequest, request: Request):
     chain: ProviderChain = request.app.state.chain
     request_id = uuid.uuid4().hex
 
-    result = await _retrieve(request, body)
-    sources = [s.to_ref() for s in result.sources]
-    context = build_context(result.sources, settings.max_context_chars)
-    messages = build_messages(body.query, context, body.history)
-    llm_request = LLMRequest(messages=messages, mode=body.mode)
+    agent = getattr(request.app.state, "agent", None)
+    use_agent = bool(settings.agent_enabled and agent is not None)
+
+    # 老路径的检索是「先固定检索、再生成」，来源在开流前就已知；
+    # Agent 路径的检索发生在工具调用里，来源要等 tool_result 才出现。
+    initial_sources: list = []
+    initial_elapsed = 0
+
+    if use_agent:
+        from bidding_qa_chatbot.llm.prompts import build_agent_messages
+
+        source_iter = agent.astream(build_agent_messages(body.query, body.history), body.mode)
+    else:
+        result = await _retrieve(request, body)
+        initial_sources = [s.to_ref() for s in result.sources]
+        initial_elapsed = result.elapsed_ms
+        context = build_context(result.sources, settings.max_context_chars)
+        messages = build_messages(body.query, context, body.history)
+        source_iter = chain.stream_with_fallback(LLMRequest(messages=messages, mode=body.mode))
 
     queue: asyncio.Queue = asyncio.Queue()
 
     async def producer() -> None:
         try:
-            async for item in chain.stream_with_fallback(llm_request):
+            async for item in source_iter:
                 await queue.put(("item", item))
         except Exception as exc:  # noqa: BLE001
             await queue.put(("error", exc))
@@ -124,16 +141,18 @@ async def chat_stream(body: ChatRequest, request: Request):
         return _error_response(request_id, first_payload)
 
     async def generate() -> AsyncIterator[str]:
-        # 参考来源必须**先于**任何 token 发出：这样「展示参考来源」这一需求
-        # 完全不依赖 LLM 的健康状况。
-        yield encode_event(
-            "sources",
-            SourcesEvent(
-                sources=sources,
-                retrieved=len(sources),
-                elapsed_ms=result.elapsed_ms,
-            ),
-        )
+        # 老路径下参考来源**先于**任何 token 发出，这样「展示参考来源」
+        # 完全不依赖 LLM 的健康状况。Agent 路径没有这个前提（检索是模型决定的），
+        # 来源会在 tool_result 那一帧带出来。
+        if not use_agent:
+            yield encode_event(
+                "sources",
+                SourcesEvent(
+                    sources=initial_sources,
+                    retrieved=len(initial_sources),
+                    elapsed_ms=initial_elapsed,
+                ),
+            )
 
         pending_kind, pending = first_kind, first_payload
         try:
@@ -148,7 +167,15 @@ async def chat_stream(body: ChatRequest, request: Request):
                     yield frame
                 if isinstance(pending, MidStreamError | AllProvidersFailed):
                     break
-                if isinstance(pending, StreamEnd):
+                # StreamEnd 是老路径的收尾；AgentDone 是 Agent 路径的收尾。
+                # 两者都代表「本轮结束」，但不能都用 StreamEnd 判断——
+                # Agent 中间轮次也会产出 StreamEnd（那一轮要求调用工具），
+                # 若按它收尾就会在第一轮工具调用后直接结束、拿不到答案。
+                from bidding_qa_chatbot.agent.agent import AgentDone
+
+                if isinstance(pending, AgentDone):
+                    break
+                if isinstance(pending, StreamEnd) and not use_agent:
                     break
 
                 try:
@@ -176,11 +203,66 @@ async def chat_stream(body: ChatRequest, request: Request):
 
 
 def _frames_for(item) -> list[str]:
+    from bidding_qa_chatbot.agent.agent import AgentDone, ToolCallNotice, ToolResultNotice
+
     if isinstance(item, LLMStreamEvent):
         name = "reasoning" if item.kind == "reasoning" else "token"
         return [encode_event(name, DeltaEvent(delta=item.text))]
+
     if isinstance(item, ProviderEvent):
         return [encode_event("provider", item)]
+
+    if isinstance(item, ToolCallNotice):
+        return [
+            encode_event(
+                "tool_call",
+                ToolCallEvent(name=item.name, arguments=item.arguments, display=item.display),
+            )
+        ]
+
+    if isinstance(item, ToolResultNotice):
+        frames = [
+            encode_event(
+                "tool_result",
+                ToolResultEvent(
+                    name=item.name,
+                    ok=item.ok,
+                    elapsed_ms=item.elapsed_ms,
+                    summary=item.summary,
+                    sources=[SourceRef.model_validate(s) for s in item.sources],
+                    degraded=item.degraded,
+                ),
+            )
+        ]
+        # 参考来源随工具结果一并推给前端，参考来源面板据此填充
+        if item.sources:
+            frames.append(
+                encode_event(
+                    "sources",
+                    SourcesEvent(
+                        sources=[SourceRef.model_validate(s) for s in item.sources],
+                        retrieved=len(item.sources),
+                        elapsed_ms=item.elapsed_ms,
+                    ),
+                )
+            )
+        return frames
+
+    if isinstance(item, AgentDone):
+        return [
+            encode_event(
+                "done",
+                DoneEvent(
+                    finish_reason=item.finish_reason,
+                    provider=item.provider,
+                    model=item.model,
+                    usage=_to_usage(item.usage),
+                    elapsed_ms=0,
+                    request_id="",
+                ),
+            )
+        ]
+
     if isinstance(item, StreamEnd):
         return [
             encode_event(
@@ -195,6 +277,7 @@ def _frames_for(item) -> list[str]:
                 ),
             )
         ]
+
     # FallbackEvent 等其余类型直接发
     from pydantic import BaseModel
 

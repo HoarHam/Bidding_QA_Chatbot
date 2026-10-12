@@ -167,6 +167,20 @@ async function main() {
     `最终 ${finalLen} 字，中间态样本 ${intermediates} 个，采样 ${samples.length} 次`,
   );
 
+  // ---------- Agent 工具调用 ----------
+  // 招投标问题应当触发知识库检索，且过程要可见——否则用户会以为界面卡住。
+  const toolItems = await page.getByTestId("tool-activity").count();
+  const toolText = toolItems ? await page.getByTestId("tool-activity").first().innerText() : "";
+  check(
+    "Agent 调用知识库检索且过程可见",
+    toolItems > 0 && /检索/.test(toolText),
+    toolItems > 0 ? `"${toolText.replace(/\s+/g, " ").slice(0, 46)}"` : "未出现工具调用条目",
+  );
+
+  // 参考来源面板应在检索后填充（Agent 路径下来源由 tool_result 带出）
+  const sourceCards = await page.locator("aside [class*='rounded-lg']").count();
+  check("参考来源面板已填充", sourceCards > 0, `${sourceCards} 条`);
+
   // ---------- 控制台无错误 ----------
   const runtimeErrors = consoleErrors.filter((e) =>
     /hydrat|Minified React error|Cannot read|is not a function|undefined|Encountered two children/i.test(

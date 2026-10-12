@@ -42,6 +42,7 @@ from bidding_qa_chatbot.llm.base import (
     RetryableProviderError,
     StreamEnd,
     StreamEvent,
+    ToolCall,
     Usage,
 )
 from bidding_qa_chatbot.schemas import DepHealth
@@ -98,6 +99,9 @@ class ZhipuProvider:
             # "thinking": null。所以两种模式都显式传值。
             "thinking": {"type": "enabled" if thinking_on else "disabled"},
         }
+        if req.tools:
+            kwargs["tools"] = req.tools
+            kwargs["tool_choice"] = "auto"
         if req.max_tokens is not None:
             kwargs["max_tokens"] = req.max_tokens
         # 与 DeepSeek 同理：思考模式下不传采样参数。
@@ -150,6 +154,8 @@ class ZhipuProvider:
         emitted = 0
         usage: Usage | None = None
         finish_reason = "stop"
+        tool_buffer: dict[int, dict[str, str]] = {}
+        reasoning_parts: list[str] = []
 
         try:
             while True:
@@ -160,14 +166,12 @@ class ZhipuProvider:
 
                 if kind == "error":
                     classified = self._classify(payload)
-                    if emitted == 0:
-                        raise classified from payload
                     raise classified from payload
 
                 chunk = payload
-                choices = getattr(chunk, "usage", None)
-                if choices:
-                    usage = _to_usage(choices)
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    usage = _to_usage(chunk_usage)
 
                 chunk_choices = getattr(chunk, "choices", None)
                 if not chunk_choices:
@@ -178,12 +182,25 @@ class ZhipuProvider:
                 if delta is not None:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
+                        reasoning_parts.append(reasoning)
                         emitted += 1
                         yield StreamEvent(kind="reasoning", text=reasoning)
                     content = getattr(delta, "content", None)
                     if content:
                         emitted += 1
                         yield StreamEvent(kind="content", text=content)
+
+                    for tc in getattr(delta, "tool_calls", None) or []:
+                        idx = getattr(tc, "index", 0) or 0
+                        entry = tool_buffer.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        if getattr(tc, "id", None):
+                            entry["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None) and not entry["name"]:
+                                entry["name"] = fn.name
+                            if getattr(fn, "arguments", None):
+                                entry["arguments"] += fn.arguments
 
                 if getattr(choice, "finish_reason", None):
                     finish_reason = choice.finish_reason
@@ -196,6 +213,12 @@ class ZhipuProvider:
             usage=usage,
             provider=self.name,
             model=self.model_for(req.mode),
+            tool_calls=[
+                ToolCall(id=e["id"] or f"call_{i}", name=e["name"], arguments=e["arguments"])
+                for i, e in sorted(tool_buffer.items())
+                if e["name"]
+            ],
+            reasoning="".join(reasoning_parts) or None,
         )
 
     # ------------------------------------------------------------ 一次性
@@ -207,6 +230,18 @@ class ZhipuProvider:
             resp = client.chat.completions.create(stream=False, **self._request_kwargs(req))
             choice = resp.choices[0]
             message = choice.message
+            calls: list[ToolCall] = []
+            for tc in getattr(message, "tool_calls", None) or []:
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                calls.append(
+                    ToolCall(
+                        id=getattr(tc, "id", "") or f"call_{len(calls)}",
+                        name=getattr(fn, "name", "") or "",
+                        arguments=getattr(fn, "arguments", "") or "",
+                    )
+                )
             return LLMResult(
                 text=getattr(message, "content", "") or "",
                 reasoning=getattr(message, "reasoning_content", None),
@@ -214,6 +249,7 @@ class ZhipuProvider:
                 usage=_to_usage(getattr(resp, "usage", None)),
                 provider=self.name,
                 model=self.model_for(req.mode),
+                tool_calls=calls,
             )
 
         try:

@@ -94,6 +94,16 @@ class Retriever:
         self.bm25 = bm25_artifact
         self.collection_vocab_sha1 = collection_vocab_sha1
 
+    @property
+    def available(self) -> bool:
+        """语义编码器是否就绪。
+
+        不可用时检索必然失败，调用方（如 Agent 的检索工具）应据此给出
+        **明确的失败信息**，而不是让它以一个 AttributeError 的形式炸出来——
+        那样模型只会收到一句无意义的报错，无法向用户解释发生了什么。
+        """
+        return self.encoder is not None
+
     # ------------------------------------------------------------ 内部
     def _sparse_available(self) -> tuple[bool, str | None]:
         """判断稀疏一路能否安全使用。"""
