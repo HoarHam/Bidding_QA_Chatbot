@@ -114,6 +114,71 @@ class FakeEncoder:
         return self._vector(query)
 
 
+# ------------------------------------------------------------------ 数据库
+@pytest.fixture
+def auth_settings(settings_factory) -> Settings:
+    """带 JWT 密钥的配置。真实环境必须显式配 JWT_SECRET，测试里给个固定值。"""
+    return settings_factory(jwt_secret="test-secret-" + "x" * 40)
+
+
+@pytest.fixture
+async def db(auth_settings):
+    """内存 SQLite 数据库（已建表）。
+
+    CI 里没有 Postgres，模型刻意只用可移植类型（`sa.Uuid` / `sa.JSON`），
+    所以 ORM 与仓储逻辑能在 SQLite 上完整验证。
+    真正需要 Postgres 的行为（JSONB、并发、索引）另用 `RUN_PG_TESTS=1` 跑。
+    """
+    from bidding_qa_chatbot.db.session import Database
+
+    database = Database("sqlite+aiosqlite:///:memory:", auth_settings)
+    await database.create_all()
+    yield database
+    await database.dispose()
+
+
+@pytest.fixture
+async def api_client(db, auth_settings):
+    """注入了测试数据库的 HTTP 客户端（不启动 lifespan，不连任何外部服务）。"""
+    import httpx
+
+    from bidding_qa_chatbot.api.app import create_app
+
+    app = create_app(auth_settings)
+    app.state.settings = auth_settings
+    app.state.db = db
+    # 聊天相关依赖置空——这些用例只验证账号与历史，不碰检索与模型
+    app.state.chain = None
+    app.state.agent = None
+    app.state.encoder = None
+    app.state.reranker = None
+    app.state.bm25 = None
+    app.state.collection_vocab_sha1 = None
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+async def register_user(client, *, username="alice", email=None, password="pw-12345678"):
+    """注册一个用户并返回 (token, user_dict)。"""
+    resp = await client.post(
+        "/api/auth/register",
+        json={
+            "username": username,
+            "email": email or f"{username}@example.com",
+            "password": password,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    return data["access_token"], data["user"]
+
+
+def auth_header(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 class FakeReranker:
     """按查询词在文本中出现的次数打分，排序可预期。"""
 

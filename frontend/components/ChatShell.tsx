@@ -1,29 +1,52 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import { BookOpen } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { BookOpen, Loader2 } from "lucide-react";
 
 import Composer from "./Composer";
+import ConversationSidebar from "./ConversationSidebar";
 import MessageList from "./MessageList";
 import SourcesPanel from "./SourcesPanel";
 import type { ChatTurn, ToolActivity } from "./MessageBubble";
-import { streamChat } from "@/lib/api";
-import type { AttemptModel, Mode, SourceRef } from "@/lib/types";
+import { getConversation, streamChat } from "@/lib/api";
+import { clearSession, fetchMe, getToken } from "@/lib/auth";
+import type { AttemptModel, Mode, MessageOut, SourceRef, UserOut } from "@/lib/types";
 
 let turnSeq = 0;
 const nextId = () => `turn-${++turnSeq}`;
 
+function toTurn(m: MessageOut): ChatTurn {
+  return {
+    id: m.id || nextId(),
+    role: m.role,
+    content: m.content,
+    reasoning: m.reasoning ?? undefined,
+    provider: m.provider,
+    model: m.model,
+  };
+}
+
 /**
- * 聊天状态机。
+ * 聊天状态机（需登录）。
  *
- * 两个刻意的设计：
+ * 几个刻意的设计：
  *
  * 1. **流一定从事件处理器里发起，绝不在 `useEffect` 里。**
  *    React 严格模式会双调用副作用，从 effect 里开流会导致同一条消息被请求两次。
- * 2. **中途失败保留已产出的正文。** 用户已经读过的文字不能被清掉，
- *    错误以提示条的形式出现在正文下方。
+ * 2. **中途失败保留已产出的正文。** 用户已经读过的文字不能被清掉。
+ * 3. **会话 id 来自后端的 `done` 事件**，而不是前端自己生成。
+ *    首轮对话的会话是在服务端建的（用户消息要先落库才能跑 Agent），
+ *    前端拿回 id 后，后续提问才接得上同一个会话。
  */
 export default function ChatShell() {
+  const router = useRouter();
+
+  const [user, setUser] = useState<UserOut | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [sidebarRefresh, setSidebarRefresh] = useState(0);
+
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [sources, setSources] = useState<SourceRef[]>([]);
   const [retrieved, setRetrieved] = useState(0);
@@ -31,26 +54,83 @@ export default function ChatShell() {
   const [busy, setBusy] = useState(false);
   const [sourcesPending, setSourcesPending] = useState(false);
   const [mobileSourcesOpen, setMobileSourcesOpen] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const lastQueryRef = useRef<string>("");
+
+  // ---- 鉴权：没有 token 或 token 失效就回登录页 ----
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!getToken()) {
+        router.replace("/login");
+        return;
+      }
+      const me = await fetchMe();
+      if (cancelled) return;
+      if (!me) {
+        router.replace("/login");
+        return;
+      }
+      setUser(me);
+      setAuthChecked(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const patchTurn = useCallback((id: string, patch: Partial<ChatTurn>) => {
     setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }, []);
 
+  const handleLogout = useCallback(() => {
+    clearSession();
+    router.replace("/login");
+  }, [router]);
+
+  const handleNewConversation = useCallback(() => {
+    abortRef.current?.abort();
+    setConversationId(null);
+    setTurns([]);
+    setSources([]);
+    setRetrieved(0);
+  }, []);
+
+  const handleSelectConversation = useCallback(
+    async (id: string) => {
+      if (id === conversationId) return;
+      abortRef.current?.abort();
+      setLoadingHistory(true);
+      try {
+        const detail = await getConversation(id);
+        setConversationId(detail.id);
+        const loaded = detail.messages.map(toTurn);
+        setTurns(loaded);
+        // 参考来源取最后一条助手消息的，与对话末尾展示的内容一致
+        const lastAssistant = [...detail.messages].reverse().find((m) => m.role === "assistant");
+        setSources(lastAssistant?.sources ?? []);
+        setRetrieved(lastAssistant?.sources?.length ?? 0);
+      } catch {
+        setTurns([]);
+        setSources([]);
+      } finally {
+        setLoadingHistory(false);
+      }
+    },
+    [conversationId],
+  );
+
   const send = useCallback(
     async (query: string, history: ChatTurn[]) => {
       lastQueryRef.current = query;
-
       const assistantId = nextId();
+      const startedIn = conversationId;
+
       setSources([]);
       setRetrieved(0);
       setSourcesPending(true);
-      // 只追加这两条新消息。**不要**把 history 也 spread 进来——
-      // history 取自当前 turns，是发给后端的对话上下文，不是要新增的 UI 项。
-      // 曾经写成 [...prev, ...history, ...]，结果每发一条消息整个会话就被复制一遍，
-      // React 立刻报 "Encountered two children with the same key"。
       setTurns((prev) => [
         ...prev,
         { id: nextId(), role: "user", content: query },
@@ -70,6 +150,7 @@ export default function ChatShell() {
           {
             query,
             mode,
+            conversation_id: startedIn,
             history: history
               .filter((t) => !t.error)
               .map((t) => ({ role: t.role, content: t.content }))
@@ -85,7 +166,6 @@ export default function ChatShell() {
               patchTurn(assistantId, { provider: e.provider, model: e.model });
             },
             onFallback: (e) => {
-              // 诚实告知用户答案来自备选模型
               patchTurn(assistantId, { fallbackFrom: e.from });
             },
             onReasoning: (e) => {
@@ -93,8 +173,6 @@ export default function ChatShell() {
               patchTurn(assistantId, { reasoning });
             },
             onToolCall: (e) => {
-              // Agent 决定检索。把过程显示出来——否则用户会以为界面卡住了
-              // （检索 + 二轮生成要好几秒）。
               tools = [
                 ...tools,
                 { key: `tool-${tools.length}`, display: e.display, pending: true },
@@ -114,13 +192,8 @@ export default function ChatShell() {
               patchTurn(assistantId, { content });
             },
             onError: (e) => {
-              // 保留已产出的正文，错误显示在下方
               patchTurn(assistantId, {
-                error: {
-                  message: e.message,
-                  partial: e.partial,
-                  attempts: e.attempts ?? [],
-                },
+                error: { message: e.message, partial: e.partial, attempts: e.attempts ?? [] },
               });
             },
             onDone: (e) => {
@@ -129,6 +202,12 @@ export default function ChatShell() {
                 provider: e.provider,
                 model: e.model,
               });
+              // 会话 id 由后端在建会话时生成，这里接住它，后续提问才能接上同一会话
+              if (e.conversation_id && e.conversation_id !== startedIn) {
+                setConversationId(e.conversation_id);
+              }
+              // 消息已落库，让侧栏刷新出这条会话
+              setSidebarRefresh((n) => n + 1);
             },
             onHttpError: (status, body) => {
               const err = (body as { error?: { message?: string; attempts?: AttemptModel[] } })
@@ -146,7 +225,6 @@ export default function ChatShell() {
           controller.signal,
         );
       } catch (err) {
-        // 主动取消不算错误
         if (!controller.signal.aborted) {
           patchTurn(assistantId, {
             streaming: false,
@@ -166,12 +244,11 @@ export default function ChatShell() {
         );
       }
     },
-    [mode, patchTurn],
+    [conversationId, mode, patchTurn],
   );
 
   const handleSend = useCallback(
     (text: string) => {
-      // 只带已完成且无错误的轮次作为历史
       const history = turns.filter((t) => t.role === "user" || t.content);
       void send(text, history);
     },
@@ -191,14 +268,39 @@ export default function ChatShell() {
     setBusy(false);
   }, []);
 
-  const turnsWithRetry = turns.map((t) =>
-    t.error ? { ...t, onRetry: handleRetry } : t,
-  );
+  if (!authChecked || !user) {
+    return (
+      <div className="flex flex-1 items-center justify-center text-sm text-slate-400">
+        <Loader2 className="mr-2 size-4 animate-spin" />
+        正在校验登录状态…
+      </div>
+    );
+  }
+
+  const turnsWithRetry = turns.map((t) => (t.error ? { ...t, onRetry: handleRetry } : t));
 
   return (
     <div className="flex min-h-0 flex-1 gap-4">
+      <div className="hidden md:flex">
+        <ConversationSidebar
+          user={user}
+          activeId={conversationId}
+          onSelect={(id) => void handleSelectConversation(id)}
+          onNew={handleNewConversation}
+          onLogout={handleLogout}
+          refreshKey={sidebarRefresh}
+        />
+      </div>
+
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <MessageList turns={turnsWithRetry} />
+        {loadingHistory ? (
+          <div className="flex flex-1 items-center justify-center text-sm text-slate-400">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            正在加载历史对话…
+          </div>
+        ) : (
+          <MessageList turns={turnsWithRetry} />
+        )}
         <div className="mt-3">
           <Composer
             onSend={handleSend}
@@ -210,17 +312,15 @@ export default function ChatShell() {
         </div>
       </section>
 
-      {/* 桌面端：右侧固定面板 */}
       <div className="hidden w-80 shrink-0 lg:block">
         <SourcesPanel sources={sources} retrieved={retrieved} pending={sourcesPending} />
       </div>
 
-      {/* 移动端：折叠抽屉 */}
       <div className="lg:hidden">
         <button
           type="button"
           onClick={() => setMobileSourcesOpen(true)}
-          className="fixed right-4 bottom-24 z-40 inline-flex items-center gap-1 rounded-full bg-brand-600 px-3 py-2 text-xs text-white shadow-lg"
+          className="fixed right-4 bottom-24 z-40 inline-flex cursor-pointer items-center gap-1 rounded-full bg-brand-600 px-3 py-2 text-xs text-white shadow-lg"
         >
           <BookOpen className="size-3.5" />
           参考来源 {retrieved > 0 && `· ${retrieved}`}
@@ -231,7 +331,7 @@ export default function ChatShell() {
             <button
               type="button"
               onClick={() => setMobileSourcesOpen(false)}
-              className="mb-2 self-end text-xs text-slate-500"
+              className="mb-2 cursor-pointer self-end text-xs text-slate-500"
             >
               关闭
             </button>

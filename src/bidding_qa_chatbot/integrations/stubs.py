@@ -70,17 +70,9 @@ class Neo4jStub(_BaseStub):
         raise NotImplementedError(f"Neo4j 知识图谱查询属于{_STAGE}")
 
 
-class PostgresStub(_BaseStub):
-    """第二阶段：招投标数据、会话记录与用户反馈。"""
-
-    def __init__(self, settings: Settings, name: str = "postgres") -> None:
-        super().__init__(settings, name, settings.enable_postgres)
-
-    async def probe(self) -> DepHealth:
-        return await self._tcp_probe(self.settings.postgres_host, self.settings.postgres_port)
-
-    async def session_store(self) -> None:
-        raise NotImplementedError(f"会话记录持久化属于{_STAGE}")
+# 注：PostgreSQL 的桩已移除——账号与对话历史**已经实现**，
+# 见 `bidding_qa_chatbot/db/`（SQLAlchemy 模型 + 仓储 + Alembic 迁移），
+# 健康检查也改成了真实连接探测而非裸 TCP。仍然只是桩的只有下面几个。
 
 
 class TavilyStub(_BaseStub):
@@ -120,10 +112,13 @@ class ExaStub(_BaseStub):
 
 
 def build_phase2_status(settings: Settings) -> dict[str, str]:
-    """汇总第二阶段的启用状态，供 `/api/health/deps` 或文档使用。"""
+    """汇总**尚未实现**的集成状态，供 `/api/health/deps` 或文档使用。
+
+    不含 postgres：账号与对话历史已经实现（见 `bidding_qa_chatbot/db/`），
+    把它继续列在「未实现」里会误导。
+    """
     return {
         "neo4j": "enabled" if settings.enable_neo4j else "disabled",
-        "postgres": "enabled" if settings.enable_postgres else "disabled",
         "web_search": "enabled" if settings.enable_web_search else "disabled",
         "stage": "phase2",
     }

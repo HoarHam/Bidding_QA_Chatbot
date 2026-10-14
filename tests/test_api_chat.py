@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 
 import httpx
@@ -27,6 +28,7 @@ from bidding_qa_chatbot.llm.base import (
 )
 from bidding_qa_chatbot.retrieval.service import RetrievalResult, RetrievedSource
 from bidding_qa_chatbot.schemas import FallbackEvent, ProviderEvent
+from tests.conftest import register_user
 
 
 def _settings() -> Settings:
@@ -36,6 +38,7 @@ def _settings() -> Settings:
         qdrant_api_key="k",
         deepseek_api_key="sk-t",
         zhipu_api_key="i.s",
+        jwt_secret="test-secret-" + "x" * 40,
     )
 
 
@@ -106,8 +109,13 @@ def _make_app(chain, retriever=None, settings=None):
 
 @pytest.fixture
 def client_factory(monkeypatch):
-    """构造测试客户端，并把检索器替换成假的。"""
+    """构造**已登录**的测试客户端，并把检索器替换成假的。
+
+    聊天端点现在要求登录（用户对话历史要落到账号上），所以这里先注册一个用户、
+    把 token 挂在客户端默认头上。数据库用内存 SQLite，不碰真实 Postgres。
+    """
     from bidding_qa_chatbot.api import routes_chat
+    from bidding_qa_chatbot.db.session import Database
 
     async def _make(chain, retriever=None):
         retriever = retriever or FakeRetriever()
@@ -116,9 +124,25 @@ def client_factory(monkeypatch):
             return await retriever.retrieve(body.query, body.top_k)
 
         monkeypatch.setattr(routes_chat, "_retrieve", fake_retrieve)
-        app = _make_app(chain)
-        transport = httpx.ASGITransport(app=app)
-        return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+        settings = _settings()
+        db = Database("sqlite+aiosqlite:///:memory:", settings)
+        await db.create_all()
+
+        app = _make_app(chain, settings=settings)
+        app.state.db = db
+
+        # 注册用**临时**客户端：httpx 的 client 只要发过请求就不能再 open，
+        # 而测试里是用 `async with client:` 打开的，提前用过会报
+        # "Cannot open a client instance more than once"。
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as bootstrap:
+            token, _ = await register_user(bootstrap, username=f"u{uuid.uuid4().hex[:8]}")
+
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        client.headers["Authorization"] = f"Bearer {token}"
+        return client
 
     return _make
 
@@ -298,6 +322,119 @@ def test_agent_not_built_when_disabled():
         )
         is None
     )
+
+
+async def test_assistant_answer_with_sources_is_persisted(client_factory):
+    """回归守卫：**带引用来源**的回答必须能落库。
+
+    曾经的 bug：`sources` 里存的是 `SourceRef` 这个 **pydantic 对象**，而 `sa.JSON`
+    底层走 `json.dumps`，遇到 BaseModel 抛
+    "Object of type SourceRef is not JSON serializable"。异常发生在回答已经
+    流式返回**之后**，被 `_persist_assistant` 的 except 降级成一条日志——
+    用户看到的是「回答显示正常，但切回历史时只剩提问、没有回答」，
+    而且再提问时模型会把那个没被恢复的问题当成待答问题一并回答。
+
+    只有带来源的回答才会复现（无来源时是空列表，能正常序列化），
+    所以表现为「没调用 RAG 的回答正常」。
+
+    既有的 SSE 测试没发现，是因为它们只断言事件流文本，**从不回查数据库**。
+    """
+    client = await client_factory(FakeChain([("text", "根据资料，保证金应在5日内退还。")]))
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "保证金什么时候退？"})
+        assert resp.status_code == 200
+        body = resp.text
+
+        done_line = next(
+            (
+                line
+                for line in body.splitlines()
+                if line.startswith("data: ") and '"conversation_id"' in line
+            ),
+            None,
+        )
+        assert done_line, "done 事件里应带上 conversation_id"
+        conversation_id = json.loads(done_line[6:])["conversation_id"]
+        assert conversation_id
+
+        # 关键：回查数据库
+        detail = await client.get(f"/api/conversations/{conversation_id}")
+        assert detail.status_code == 200
+
+    messages = detail.json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"], (
+        f"助手回答没有落库，实际消息：{[m['role'] for m in messages]}"
+    )
+
+    assistant = messages[1]
+    assert assistant["content"] == "根据资料，保证金应在5日内退还。"
+    assert len(assistant["sources"]) == 1, "引用来源必须一并存下来"
+    assert assistant["sources"][0]["chunk_id"] == "qa0113-0000"
+    assert assistant["sources"][0]["source_label"].startswith("招投标问答样例数据")
+
+
+async def test_persisted_answer_survives_reload_with_sources(client_factory):
+    """跨会话恢复：重新拉取会话时，带来源的回答要能完整还原。
+
+    这条直接对应「恢复会话后只显示用户问题、不显示回答」的症状。
+    """
+    client = await client_factory(FakeChain([("text", "回答内容")]))
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "问题"})
+        done_line = next(
+            line
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and '"conversation_id"' in line
+        )
+        cid = json.loads(done_line[6:])["conversation_id"]
+
+        # 模拟用户刷新页面后重新拉取
+        first = (await client.get(f"/api/conversations/{cid}")).json()
+        second = (await client.get(f"/api/conversations/{cid}")).json()
+
+    assert len(first["messages"]) == 2
+    assert first["messages"] == second["messages"], "两次拉取结果应一致"
+    assert first["messages"][1]["sources"], "来源不能在往返中丢失"
+
+
+def test_accumulate_dedupes_sources_by_chunk_id():
+    """回归守卫：多次检索命中同一 chunk 时不能产生重复来源。
+
+    Agent 常做多次检索（先查主问题、再补限定词），两次命中同一个 chunk
+    就会出现重复条目。除了冗余，还会让前端以 chunk_id 为 key 渲染时触发
+    React 的 "Encountered two children with the same key"。
+    """
+    from bidding_qa_chatbot.agent.agent import ToolResultNotice
+    from bidding_qa_chatbot.api.routes_chat import _accumulate
+
+    def src(cid: str) -> dict:
+        return {
+            "chunk_id": cid,
+            "source_label": f"标签{cid}",
+            "question": "q",
+            "snippet": "s",
+            "excel_row": 1,
+            "rrf_score": 0.1,
+            "rerank_score": 0.9,
+            "images": [],
+        }
+
+    def notice(cids: list[str]) -> ToolResultNotice:
+        return ToolResultNotice(
+            name="t", ok=True, elapsed_ms=1, summary="", sources=[src(c) for c in cids]
+        )
+
+    answer: list = []
+    reasoning: list = []
+    sources: list = []
+    finished: dict = {}
+
+    _accumulate(notice(["a", "b"]), answer, reasoning, sources, finished)
+    _accumulate(notice(["b", "c"]), answer, reasoning, sources, finished)
+
+    assert [s.chunk_id for s in sources] == ["a", "b", "c"], "重复来源没有被去掉"
+    # 去重后必须仍是 SourceRef（可 JSON 序列化），这是能落库的前提
+    assert sources[0].__class__.__name__ == "SourceRef"
 
 
 def test_http_client_timeout_is_constructible():

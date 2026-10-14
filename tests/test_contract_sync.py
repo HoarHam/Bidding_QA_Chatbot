@@ -57,6 +57,17 @@ def test_frontend_types_mirror_backend_schemas():
         ("ErrorEvent", schemas.ErrorEvent),
         ("DoneEvent", schemas.DoneEvent),
         ("RetrieveResponse", schemas.RetrieveResponse),
+        # 账号与对话历史
+        ("RegisterRequest", schemas.RegisterRequest),
+        ("LoginRequest", schemas.LoginRequest),
+        ("UserOut", schemas.UserOut),
+        ("TokenResponse", schemas.TokenResponse),
+        ("MessageOut", schemas.MessageOut),
+        ("ConversationSummary", schemas.ConversationSummary),
+        ("ConversationListResponse", schemas.ConversationListResponse),
+        ("ConversationDetail", schemas.ConversationDetail),
+        ("SearchHit", schemas.SearchHit),
+        ("SearchResponse", schemas.SearchResponse),
     ]
 
     problems: list[str] = []

@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 Mode = Literal["fast", "thinking"]
 
@@ -23,9 +24,10 @@ class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     mode: Mode = "fast"
     top_k: int | None = Field(default=None, ge=1, le=50)
-    # 只带最近若干轮；第一阶段的会话不落库，由前端持有。
+    # 只带最近若干轮作为上下文；完整历史在服务端按 conversation_id 落库。
     history: list[ChatMessage] = Field(default_factory=list, max_length=12)
-    session_id: str | None = None
+    #: 续接已有会话时传入；为空则新建一个会话。
+    conversation_id: str | None = None
 
 
 # ---------------------------------------------------------------- 引用来源
@@ -82,6 +84,7 @@ class ChatResponse(BaseModel):
     usage: Usage | None = None
     elapsed_ms: int
     request_id: str
+    conversation_id: str | None = None
 
 
 class AttemptModel(BaseModel):
@@ -166,6 +169,8 @@ class DoneEvent(BaseModel):
     usage: Usage | None = None
     elapsed_ms: int
     request_id: str
+    #: 本次问答所属会话。前端据此把后续提问接到同一会话上（跨会话恢复的关键）。
+    conversation_id: str | None = None
 
 
 # ---------------------------------------------------------------- 健康检查
@@ -179,6 +184,86 @@ class DepHealth(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     deps: list[DepHealth]
+
+
+# ---------------------------------------------------------------- 认证
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_一-龥-]+$")
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str | None = Field(default=None, max_length=64)
+
+
+class LoginRequest(BaseModel):
+    #: 允许用用户名或邮箱登录
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserOut(BaseModel):
+    id: str
+    username: str
+    email: str
+    display_name: str | None = None
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserOut
+
+
+# ---------------------------------------------------------------- 对话历史
+class MessageOut(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    reasoning: str | None = None
+    sources: list[SourceRef] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
+    created_at: datetime
+
+
+class ConversationSummary(BaseModel):
+    id: str
+    title: str
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationSummary]
+    total: int
+
+
+class ConversationDetail(BaseModel):
+    id: str
+    title: str
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+    messages: list[MessageOut]
+
+
+class SearchHit(BaseModel):
+    """一条命中搜索的消息，带上所属会话信息以便跳转。"""
+
+    conversation_id: str
+    conversation_title: str
+    message_id: str
+    role: Literal["user", "assistant"]
+    snippet: str
+    created_at: datetime
+
+
+class SearchResponse(BaseModel):
+    query: str
+    hits: list[SearchHit]
+    total: int
 
 
 class StatsResponse(BaseModel):

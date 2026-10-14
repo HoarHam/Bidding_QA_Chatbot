@@ -18,7 +18,6 @@ from bidding_qa_chatbot.config import Settings
 from bidding_qa_chatbot.integrations.stubs import (
     ExaStub,
     Neo4jStub,
-    PostgresStub,
     TavilyStub,
     build_phase2_status,
 )
@@ -35,24 +34,37 @@ def _settings(**kw) -> Settings:
     return Settings(_env_file=None, **base)
 
 
-def test_phase2_drivers_are_not_installed():
-    """本阶段这些包就不该存在——它们留在 optional-dependencies.phase2 里。"""
-    for module in ("neo4j", "psycopg", "sqlalchemy", "tavily"):
-        assert importlib.util.find_spec(module) is None, f"{module} 不该在本阶段安装"
+def test_remaining_stub_drivers_are_not_installed():
+    """仍未实现的集成，其驱动不该被安装——它们留在 optional-dependencies.phase2 里。"""
+    for module in ("neo4j", "tavily"):
+        assert importlib.util.find_spec(module) is None, f"{module} 不该被安装"
+
+
+def test_postgres_is_a_real_dependency_now():
+    """PostgreSQL 已从「桩」升级为真实实现（账号 + 对话历史）。
+
+    这条断言防止有人把它当成未实现的功能又挪回 phase2 可选依赖里。
+    """
+    import importlib.util
+
+    for module in ("sqlalchemy", "psycopg"):
+        assert importlib.util.find_spec(module) is not None, f"{module} 应当是必需依赖"
+
+    from bidding_qa_chatbot.db import models
+
+    assert {"users", "conversations", "messages"} <= set(models.Base.metadata.tables)
 
 
 def test_stubs_report_disabled_by_default():
     s = _settings()
     assert Neo4jStub(s).status() == "not_configured"
-    assert PostgresStub(s).status() == "not_configured"
     assert TavilyStub(s).status() == "not_configured"
     assert ExaStub(s).status() == "not_configured"
 
 
 def test_stubs_report_configured_when_env_enables_them():
-    s = _settings(enable_neo4j=True, enable_postgres=True, enable_web_search=True)
+    s = _settings(enable_neo4j=True, enable_web_search=True)
     assert Neo4jStub(s).status() == "configured"
-    assert PostgresStub(s).status() == "configured"
     assert TavilyStub(s).status() == "configured"
     assert ExaStub(s).status() == "configured"
 
@@ -77,9 +89,11 @@ async def test_neo4j_query_is_explicitly_unimplemented():
         await Neo4jStub(_settings()).query("MATCH (n) RETURN n")
 
 
-async def test_postgres_session_store_is_explicitly_unimplemented():
-    with pytest.raises(NotImplementedError, match="第二阶段"):
-        await PostgresStub(_settings()).session_store()
+def test_phase2_status_no_longer_lists_postgres_as_a_stub():
+    """状态摘要里不该再把 postgres 当作未实现的集成。"""
+    status = build_phase2_status(_settings())
+    assert "postgres" not in status
+    assert status["stage"] == "phase2"
 
 
 async def test_tavily_search_is_explicitly_unimplemented():
@@ -103,7 +117,6 @@ def test_phase2_status_summary():
     status = build_phase2_status(_settings())
     assert status["stage"] == "phase2"
     assert status["neo4j"] == "disabled"
-    assert status["postgres"] == "disabled"
 
 
 def test_stub_never_echoes_secret():

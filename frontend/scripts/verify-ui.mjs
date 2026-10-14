@@ -98,8 +98,31 @@ async function main() {
   });
   page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
 
-  await page.goto(SITE, { waitUntil: "load" });
+  await page.goto(`${SITE}/login`, { waitUntil: "load" });
   await page.waitForTimeout(2500); // 等 hydration
+
+  // ---------- 登录（现在必须登录才能对话）----------
+  const username = `verify${Date.now().toString(36)}`;
+  await page.locator('input[autocomplete="username"]').fill(username);
+  await page.getByRole("button", { name: "注册", exact: true }).click();
+  await page.locator('input[autocomplete="email"]').fill(`${username}@example.com`);
+  await page.locator('input[autocomplete="new-password"]').fill("verify-password-123");
+  await page.getByRole("button", { name: "注册并登录" }).click();
+  await page.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  check("注册并登录成功（跳离登录页）", !new URL(page.url()).pathname.startsWith("/login"), page.url());
+
+  // 未登录访问首页应被拦回登录页——用一个干净的上下文验证
+  const anon = await browser.newContext();
+  const anonPage = await anon.newPage();
+  await anonPage.goto(SITE, { waitUntil: "load" });
+  await anonPage.waitForTimeout(2500);
+  check(
+    "未登录访问首页会被拦到登录页",
+    new URL(anonPage.url()).pathname.startsWith("/login"),
+    anonPage.url(),
+  );
+  await anon.close();
 
   // ---------- 交互可用性（对应「客户端 JS 未接管」那类故障）----------
   const thinking = page.getByRole("button", { name: "深度思考" });
@@ -180,6 +203,51 @@ async function main() {
   // 参考来源面板应在检索后填充（Agent 路径下来源由 tool_result 带出）
   const sourceCards = await page.locator("aside [class*='rounded-lg']").count();
   check("参考来源面板已填充", sourceCards > 0, `${sourceCards} 条`);
+
+  // ---------- 对话历史持久化 ----------
+  // 消息落库后，侧栏应出现这条会话
+  await page.waitForTimeout(1200);
+  const convItems = await page.getByTestId("conversation-item").count();
+  check("发送后会话出现在侧栏（已落库）", convItems > 0, `${convItems} 条会话`);
+
+  // ---------- 跨会话恢复：刷新页面后历史仍在 ----------
+  await page.reload({ waitUntil: "load" });
+  await page.waitForTimeout(2500); // 等鉴权校验 + 列表加载
+  const afterReload = await page.getByTestId("conversation-item").count();
+  check("刷新后仍处于登录态且历史仍在", afterReload > 0, `${afterReload} 条会话`);
+
+  // ---------- 点开历史会话，消息应从数据库恢复 ----------
+  //
+  // 必须先「新对话」清空视图再点历史会话。否则点的就是当前已打开的那个，
+  // `handleSelectConversation` 会因 `id === conversationId` 直接 return，
+  // 屏幕上留着的仍是本次会话的实时状态——检查会**因为错误的原因通过**，
+  // 测不出「回答没落库」这类问题（这正是之前漏掉带来源回答落库失败的缘故）。
+  await page.getByRole("button", { name: "新对话" }).click();
+  await page.waitForTimeout(800);
+  const afterClear = await page.locator('[data-role="assistant"]').count();
+  check("新对话已清空当前视图", afterClear === 0, `剩余 ${afterClear} 条助手消息`);
+
+  await page.getByTestId("conversation-item").first().click();
+  await page.waitForTimeout(2000);
+
+  const restoredBubbles = page.locator('[data-role="assistant"]');
+  const restoredCount = await restoredBubbles.count();
+  const restoredText = restoredCount ? (await restoredBubbles.first().innerText()).trim() : "";
+  check(
+    "点开历史会话可恢复助手回答（且有内容）",
+    restoredCount > 0 && restoredText.length > 0,
+    `${restoredCount} 条助手消息，首条 ${restoredText.length} 字`,
+  );
+
+  // 带引用来源的回答必须连来源一起恢复——只恢复正文不算通过
+  const restoredSources = await page.getByTestId("source-card").count();
+  check("恢复的回答带回了引用来源", restoredSources > 0, `${restoredSources} 条来源`);
+
+  // ---------- 搜索历史对话 ----------
+  await page.getByPlaceholder("搜索历史对话…").fill("保证金");
+  await page.waitForTimeout(1200);
+  const hits = await page.getByTestId("search-hit").count();
+  check("搜索历史对话能命中", hits > 0, `${hits} 条命中`);
 
   // ---------- 控制台无错误 ----------
   const runtimeErrors = consoleErrors.filter((e) =>

@@ -13,15 +13,14 @@
 from bidding_qa_chatbot.integrations.stubs import (
     ExaStub,
     Neo4jStub,
-    PostgresStub,
     TavilyStub,
     build_phase2_status,
 )
 
+# 注意：PostgreSQL **已不是桩**，账号与对话历史的实现在 bidding_qa_chatbot/db/
 __all__ = [
     "ExaStub",
     "Neo4jStub",
-    "PostgresStub",
     "TavilyStub",
     "build_phase2_status",
 ]

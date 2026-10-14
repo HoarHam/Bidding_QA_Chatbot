@@ -1,9 +1,13 @@
 /** 后端接口封装。所有路径都是相对的，经 Next 的开发代理转发，不需要 CORS。 */
 
+import { authHeaders } from "./auth";
 import { consumeSSE, type SSEHandler } from "./sse";
 import type {
   ChatRequest,
+  ConversationDetail,
+  ConversationListResponse,
   RetrieveResponse,
+  SearchResponse,
   SourceDetail,
   StatsResponse,
 } from "./types";
@@ -50,7 +54,7 @@ export async function retrieveOnly(body: ChatRequest): Promise<RetrieveResponse 
   try {
     const res = await fetch(`${baseUrl()}/api/retrieve`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify(body),
     });
     if (!res.ok) return null;
@@ -58,6 +62,47 @@ export async function retrieveOnly(body: ChatRequest): Promise<RetrieveResponse 
   } catch {
     return null;
   }
+}
+
+
+// ---------------------------------------------------------------- 对话历史
+export async function listConversations(): Promise<ConversationListResponse> {
+  const res = await fetch(`${baseUrl()}/api/conversations`, {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`加载会话列表失败（HTTP ${res.status}）`);
+  return (await res.json()) as ConversationListResponse;
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  const res = await fetch(`${baseUrl()}/api/conversations/${encodeURIComponent(id)}`, {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  if (res.status === 404) throw new Error("会话不存在或无权访问");
+  if (!res.ok) throw new Error(`加载会话失败（HTTP ${res.status}）`);
+  return (await res.json()) as ConversationDetail;
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  const res = await fetch(`${baseUrl()}/api/conversations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  // 204 是正常返回；404 说明已经不存在，对调用方而言等同于删除成功
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`删除失败（HTTP ${res.status}）`);
+  }
+}
+
+export async function searchConversations(query: string): Promise<SearchResponse> {
+  const res = await fetch(
+    `${baseUrl()}/api/conversations/search?q=${encodeURIComponent(query)}`,
+    { headers: authHeaders(), cache: "no-store" },
+  );
+  if (!res.ok) throw new Error(`搜索失败（HTTP ${res.status}）`);
+  return (await res.json()) as SearchResponse;
 }
 
 /** 发起流式问答。返回的 Promise 在流消费完毕后 resolve。 */
@@ -68,7 +113,11 @@ export async function streamChat(
 ): Promise<void> {
   const res = await fetch(`${baseUrl()}/api/chat/stream`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    headers: {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      ...authHeaders(),
+    },
     body: JSON.stringify(body),
     signal,
   });

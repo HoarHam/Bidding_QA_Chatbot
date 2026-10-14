@@ -43,7 +43,16 @@ cd frontend && npm install # 前端
    uv run bidding-qa-chatbot check
    ```
 
-3. **语料入库**（首次必做）：
+3. **初始化数据库**（首次必做，需要 PostgreSQL）：
+
+   ```bash
+   # .env 里的 POSTGRES_PASSWORD 需填真实密码
+   uv run alembic upgrade head
+   ```
+
+   账号与对话历史存在这里。详见 `docs/database.md`。
+
+4. **语料入库**（首次必做）：
 
    ```bash
    uv run bidding-qa-chatbot ingest
@@ -52,13 +61,13 @@ cd frontend && npm install # 前端
    会读取 `data/processed/问题答案样例数据0113.xlsx`（80 条问答 + 3 张内嵌图片），
    用视觉模型解析图片内容，编码后写入 Qdrant。重复执行是幂等的。
 
-4. **启动后端**：
+5. **启动后端**：
 
    ```bash
    uv run bidding-qa-chatbot serve          # http://127.0.0.1:8001 ，文档 /docs
    ```
 
-5. **启动前端**（另开终端）：
+6. **启动前端**（另开终端）：
 
    ```bash
    cd frontend && npm run dev               # http://localhost:3000

@@ -10,7 +10,8 @@ dependencies = [
     # --- Web 框架 (需求 3) ---
     "fastapi>=0.141,<0.142",
     "uvicorn[standard]>=0.38",
-    "pydantic>=2.13,<3",
+    # [email] 提供 EmailStr 所需的 email-validator
+    "pydantic[email]>=2.13,<3",
     "pydantic-settings>=2.15,<3",
     # --- 配置 (需求 15) ---
     "python-dotenv>=1.2,<2",
@@ -34,6 +35,15 @@ dependencies = [
     # --- 数据处理 (需求 14) ---
     "pandas>=3.0,<4",
     "openpyxl>=3.1.5,<4",
+    # --- 关系数据存储：账号与对话历史 (第二阶段) ---
+    # 用 psycopg3 的**异步**驱动（postgresql+psycopg://），与全异步应用一致
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+    "alembic>=1.13,<2",
+    # --- 认证 ---
+    # PyJWT 之前是 zai-sdk 的传递依赖，这里显式声明，避免上游换实现时被动
+    "pyjwt>=2.9,<3",
+    "bcrypt>=4.2,<5",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +72,9 @@ dev = [
     # respx 只在 openai<3 时可用（见上方注释）
     "respx>=0.23.1,<0.24",
     "ruff>=0.14",
+    # 测试用：CI 与环境里没有 Postgres 时，用 SQLite 跑 ORM/仓储逻辑。
+    # 模型刻意只用可移植类型（sa.Uuid / sa.JSON），两种数据库都能跑。
+    "aiosqlite>=0.20,<1",
 ]
 
 [tool.pytest.ini_options]

@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -27,6 +29,18 @@ from bidding_qa_chatbot.retrieval import bm25 as bm25_mod
 from bidding_qa_chatbot.retrieval.qdrant_store import build_client, collection_meta
 
 logger = logging.getLogger(__name__)
+
+
+def _describe_db_url(url: str) -> str:
+    """把连接串转成可安全打日志的形态（**不含凭据**）。"""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").split("+")[0]  # postgresql+psycopg → postgresql
+    host = parsed.hostname or "?"
+    port = f":{parsed.port}" if parsed.port else ""
+    db = (parsed.path or "").lstrip("/") or "?"
+    return f"{scheme}://{host}{port}/{db}"
 
 
 def build_http_client(settings: Settings) -> httpx.AsyncClient:
@@ -100,6 +114,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.http = build_http_client(settings)
     app.state.qdrant = build_client(settings)
 
+    # ---- 关系数据库：账号与对话历史 ----
+    from bidding_qa_chatbot.db.session import Database
+
+    # psycopg 的异步模式**无法**在 Windows 的 ProactorEventLoop 上运行。
+    # 这里主动检测并给出可操作的提示，而不是让它在第一次查询时抛一句
+    # "Psycopg cannot use the 'ProactorEventLoop'"——那种报错很难定位到启动方式上。
+    loop_name = type(asyncio.get_running_loop()).__name__
+    if sys.platform == "win32" and "Proactor" in loop_name:
+        logger.error(
+            "当前事件循环是 %s，PostgreSQL 异步驱动无法在此循环上工作，"
+            "账号与对话历史将不可用。请用 `uv run bidding-qa-chatbot serve` 启动"
+            "（它会在 Windows 上显式使用 SelectorEventLoop）。",
+            loop_name,
+        )
+
+    app.state.db = Database(settings.database_url, settings)
+    db_ok, db_err = await app.state.db.healthcheck()
+    if db_ok:
+        # 打印**实际**连接目标，而不是 .env 里的 POSTGRES_*：DATABASE_URL 覆盖
+        # 生效时两者不同，照着错的日志排查会走很远弯路。
+        logger.info("数据库已连接: %s", _describe_db_url(settings.database_url))
+    else:
+        # 连不上不阻止服务启动：健康检查会如实报告，登录/历史相关接口自然失败，
+        # 但检索与健康检查仍然可用，便于排查问题。
+        logger.error("数据库连接失败（登录与对话历史将不可用）: %s", redact(str(db_err)))
+
     # BM25 工件与集合元数据：用于判断稀疏一路能否安全使用。
     app.state.bm25 = bm25_mod.load_artifact(settings.extracted_dir / "bm25.json")
     app.state.collection_vocab_sha1 = None
@@ -147,6 +187,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await app.state.http.aclose()
         await app.state.qdrant.close()
+        with contextlib.suppress(Exception):
+            await app.state.db.dispose()
         # provider 关闭失败不该影响进程退出
         with contextlib.suppress(Exception):
             await app.state.chain.aclose()
@@ -172,11 +214,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    from bidding_qa_chatbot.api.routes_auth import router as auth_router
     from bidding_qa_chatbot.api.routes_chat import router as chat_router
+    from bidding_qa_chatbot.api.routes_conversations import router as conversations_router
     from bidding_qa_chatbot.api.routes_health import router as health_router
     from bidding_qa_chatbot.api.routes_sources import router as sources_router
 
     app.include_router(health_router)
+    app.include_router(auth_router)
+    app.include_router(conversations_router)
     app.include_router(sources_router)
     app.include_router(chat_router)
     return app

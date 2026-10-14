@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -137,7 +138,33 @@ async def _probe_zhipu(settings: Settings) -> DepHealth:
     return await _probe_tcp("zhipu", host, port)
 
 
-async def probe_all(settings: Settings, client: httpx.AsyncClient) -> list[DepHealth]:
+async def _probe_database(settings: Settings, db: Any = None) -> DepHealth:
+    """探测关系数据库。
+
+    比 TCP 探测严格：端口通不代表库存在、凭据正确、表已建好。
+    用一次真实连接（`SELECT 1`）来判断。
+    """
+    if not settings.postgres_db:
+        return DepHealth(name="postgres", status="not_configured", message="POSTGRES_DB 未配置")
+
+    if db is None:
+        from bidding_qa_chatbot.db.session import Database
+
+        db = Database(settings.database_url, settings)
+
+    ok, error = await db.healthcheck()
+    if ok:
+        return DepHealth(name="postgres", status="ok")
+    return DepHealth(
+        name="postgres",
+        status="unavailable",
+        message=redact(str(error))[:200],
+    )
+
+
+async def probe_all(
+    settings: Settings, client: httpx.AsyncClient, db: Any = None
+) -> list[DepHealth]:
     """并发探测所有依赖。CLI 的 `check` 与 `/api/health/deps` 共用这一份实现。"""
     tasks = [
         _probe_qdrant(settings, client),
@@ -168,10 +195,9 @@ async def probe_all(settings: Settings, client: httpx.AsyncClient) -> list[DepHe
     else:
         tasks.append(_not_configured("neo4j"))
 
-    if settings.enable_postgres:
-        tasks.append(_probe_tcp("postgres", settings.postgres_host, settings.postgres_port))
-    else:
-        tasks.append(_not_configured("postgres"))
+    # 数据库是实打实的功能依赖（账号 + 对话历史），不只做 TCP 探测：
+    # 端口通不代表库存在、凭据正确、表已建好。
+    tasks.append(_probe_database(settings))
 
     return list(await asyncio.gather(*tasks))
 
@@ -191,7 +217,7 @@ async def health_deps(request: Request) -> HealthResponse:
     settings: Settings = request.app.state.settings
     client: httpx.AsyncClient = request.app.state.http
 
-    deps = await probe_all(settings, client)
+    deps = await probe_all(settings, client, getattr(request.app.state, "db", None))
     overall = "ok" if all(d.status in ("ok", "not_configured") for d in deps) else "degraded"
     return HealthResponse(status=overall, deps=deps)
 

@@ -18,7 +18,8 @@ export interface ChatRequest {
   mode?: Mode;
   top_k?: number | null;
   history?: ChatMessage[];
-  session_id?: string | null;
+  /** 续接已有会话时传入；为空则新建一个会话。 */
+  conversation_id?: string | null;
 }
 
 // ---------------------------------------------------------------- 引用来源
@@ -73,6 +74,7 @@ export interface ChatResponse {
   usage: Usage | null;
   elapsed_ms: number;
   request_id: string;
+  conversation_id: string | null;
 }
 
 export interface AttemptModel {
@@ -176,4 +178,84 @@ export interface DoneEvent {
   usage: Usage | null;
   elapsed_ms: number;
   request_id: string;
+  /** 本次问答所属会话。前端据此把后续提问接到同一会话上。 */
+  conversation_id: string | null;
+}
+
+// ---------------------------------------------------------------- 账号
+export interface RegisterRequest {
+  username: string;
+  email: string;
+  password: string;
+  display_name?: string | null;
+}
+
+export interface LoginRequest {
+  /** 用户名或邮箱 */
+  username: string;
+  password: string;
+}
+
+export interface UserOut {
+  id: string;
+  username: string;
+  email: string;
+  display_name: string | null;
+  created_at: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: UserOut;
+}
+
+// ---------------------------------------------------------------- 对话历史
+export interface MessageOut {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  reasoning: string | null;
+  sources: SourceRef[];
+  provider: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
+  total: number;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+  messages: MessageOut[];
+}
+
+export interface SearchHit {
+  conversation_id: string;
+  conversation_title: string;
+  message_id: string;
+  role: "user" | "assistant";
+  snippet: string;
+  created_at: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  hits: SearchHit[];
+  total: number;
 }

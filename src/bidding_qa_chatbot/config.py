@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -122,6 +122,27 @@ class Settings(BaseSettings):
     enable_ingest_endpoint: bool = False
     ingest_token: SecretStr | None = None
 
+    # ---------- 关系数据库：账号与对话历史 ----------
+    # 显式给出连接串时优先使用（云端/容器部署常用整串连接串，也会覆盖 alembic 的目标库）。
+    # 同时接受 DATABASE_URL 与 DATABASE_URL_OVERRIDE 两个环境变量名：
+    # 前者是业界通用叫法，而字段名带上 _override 后 pydantic 默认只会认后者——
+    # 只认后者的话，按惯例设了 DATABASE_URL 的人会以为覆盖生效了，实际却连到了 .env 里的库。
+    database_url_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "DATABASE_URL_OVERRIDE"),
+    )
+    db_echo: bool = False
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+
+    # ---------- 认证 ----------
+    # 必须显式配置。不给默认值：默认密钥等于把所有人的账号交出去，
+    # 而随机生成的临时密钥会在进程重启后让所有 token 失效、多 worker 下还会互相冲突。
+    jwt_secret: SecretStr | None = None
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # 7 天
+    password_min_length: int = 8
+
     # ---------- 第二阶段：仅配置与可达性探测，不实现业务逻辑 ----------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
@@ -159,6 +180,27 @@ class Settings(BaseSettings):
         return self
 
     # ---------- 派生属性 ----------
+    @property
+    def database_url(self) -> str:
+        """异步驱动连接串（psycopg3 的 async 模式）。
+
+        密码必须做 URL 编码：随机密码里出现 `@` `/` `:` 等字符时，
+        不编码会把连接串解析成完全不同的主机/端口——而且报错信息通常
+        不会指向真正的原因。
+        """
+        if self.database_url_override:
+            return self.database_url_override
+
+        from urllib.parse import quote_plus
+
+        password = self.postgres_password
+        raw = password.get_secret_value() if password else ""
+        user = quote_plus(self.postgres_user or "")
+        return (
+            f"postgresql+psycopg://{user}:{quote_plus(raw)}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db or ''}"
+        )
+
     @property
     def extracted_dir(self) -> Path:
         return self.data_dir / self.extracted_dir_name
@@ -219,6 +261,11 @@ def validate_runtime(settings: Settings) -> list[str]:
         problems.append("QDRANT_API_KEY 未配置")
     if settings.qdrant_distance.lower() not in {"cosine", "dot", "euclid", "manhattan"}:
         problems.append(f"QDRANT_DISTANCE 取值非法: {settings.qdrant_distance}")
+    if settings.jwt_secret is None:
+        problems.append(
+            "JWT_SECRET 未配置（登录与账号功能不可用）。生成一个："
+            'python -c "import secrets;print(secrets.token_urlsafe(48))"'
+        )
     if settings.qdrant_vector_size != 512:
         problems.append(
             f"QDRANT_VECTOR_SIZE={settings.qdrant_vector_size}，"

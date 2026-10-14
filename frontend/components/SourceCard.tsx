@@ -19,7 +19,10 @@ export default function SourceCard({ source, rank }: { source: SourceRef; rank: 
   const score = source.rerank_score;
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3 transition hover:border-brand-500/50 hover:shadow-sm">
+    <div
+      data-testid="source-card"
+      className="rounded-lg border border-slate-200 bg-white p-3 transition hover:border-brand-500/50 hover:shadow-sm"
+    >
       <div className="mb-1.5 flex items-start gap-2">
         <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded bg-slate-100 text-[11px] font-medium text-slate-600">
           {rank}

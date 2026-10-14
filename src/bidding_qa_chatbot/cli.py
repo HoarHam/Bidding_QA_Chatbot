@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 
 from bidding_qa_chatbot.config import ENV_FILE, ROOT_DIR, get_settings, validate_runtime
 from bidding_qa_chatbot.log import setup_logging
+
+if sys.platform == "win32":
+    # psycopg 的异步模式不能跑在 ProactorEventLoop 上（Windows 的默认循环）。
+    # 在模块顶层设置，是为了让 `--reload` 派生的子进程重新导入本模块时也生效——
+    # 子进程不经过 _cmd_serve 的分支逻辑。
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -114,13 +121,42 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     host = args.host or settings.api_host
     port = args.port or settings.api_port
     print(f"启动 API 服务 http://{host}:{port}  (文档 /docs)")
-    uvicorn.run(
+
+    config = uvicorn.Config(
         "bidding_qa_chatbot.api.app:app",
         host=host,
         port=port,
         reload=args.reload,
         log_level=args.log_level.lower(),
     )
+
+    if sys.platform != "win32":
+        uvicorn.Server(config).run()
+        return 0
+
+    # Windows 专用处理：psycopg 的**异步**模式无法在 ProactorEventLoop 上运行
+    # （会抛 InterfaceError: Psycopg cannot use the 'ProactorEventLoop'），
+    # 而 Windows 的默认事件循环就是 Proactor，uvicorn 在某些启动方式下还会显式选它。
+    #
+    # 实测：设事件循环*策略*不足以覆盖（uvicorn 创建循环的时机不受它约束），
+    # 因此这里显式建一个 Selector 循环并交出去，不依赖任何策略设置。
+    if args.reload:
+        # reload 需要 uvicorn 自己起监督进程，不能接管循环。
+        # 子进程会重新导入本模块，策略在模块顶层已设置（见文件末尾），因此同样生效。
+        uvicorn.Server(config).run()
+        return 0
+
+    loop = asyncio.SelectorEventLoop()
+    asyncio.set_event_loop(loop)
+    server = uvicorn.Server(config)
+    try:
+        loop.run_until_complete(server.serve())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(server.shutdown())
+        loop.close()
     return 0
 
 

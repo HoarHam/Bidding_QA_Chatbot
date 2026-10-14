@@ -71,6 +71,9 @@ logs/
 # ---------- 数据库 / 本地存储 ----------
 *.sqlite3
 *.db
+# 开发/验证用的临时 SQLite 库（无 Postgres 时用它跑通全栈）
+_dev_verify.db
+_dev_verify.db-journal
 
 # ---------- 操作系统 ----------
 .DS_Store
