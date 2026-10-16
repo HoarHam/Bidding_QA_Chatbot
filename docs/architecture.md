@@ -1,7 +1,9 @@
 # 系统架构
 
-第一阶段只做 RAG：把 Excel 里的问答语料入库到 Qdrant，用「稠密 + 稀疏」混合检索召回，
-CrossEncoder 精排，再交给可切换的 LLM 流式作答，并在前端展示参考来源。
+问答语料入库到 Qdrant（稠密 + 稀疏混合检索、CrossEncoder 精排），招投标交易事实
+（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）注入 Neo4j 知识图谱。
+两者都注册为 Agent 工具，由可切换的 LLM 根据问题自行选择，流式作答并在前端展示
+参考来源与工具调用过程。
 
 ```mermaid
 flowchart LR
@@ -13,11 +15,13 @@ flowchart LR
         API["API 层<br/>/api/chat/stream · SSE"]
         AG["Agent 层<br/>工具调用循环"]
         RET["检索层<br/>hybrid → RRF → rerank"]
+        GR["图谱层<br/>只读事务 + 参数化模板"]
         LLM["LLM 层<br/>provider 链 + 回退"]
     end
 
     subgraph ext["外部依赖"]
         QD[("Qdrant Cloud<br/>bid_qa")]
+        NEO[("Neo4j<br/>BiddingRelations")]
         DS["DeepSeek<br/>deepseek-flash"]
         ZP["智谱<br/>glm-4.7-flashx"]
         VL["vLLM<br/>本地（仅留接口）"]
@@ -34,6 +38,8 @@ flowchart LR
     RET --> EMB
     RET --> QD
     RET --> RRK
+    AG -->|"工具：query_bidding_graph"| GR
+    GR --> NEO
     AG --> LLM
     LLM --> DS
     LLM -.降级.-> ZP
@@ -87,14 +93,20 @@ sequenceDiagram
 ## 为什么这样分层
 
 - **`agent/` 单独成层**：它编排「模型 ↔ 工具」的往返，不关心检索内部怎么实现，
-  也不关心用的是哪家 LLM。新增工具只碰 `agent/`，检索与模型两侧都不用动。
-- **`llm/`、`embeddings/`、`retrieval/` 分开放**：三者失败模式和伸缩性完全不同。
-  LLM 挂了不该拖垮检索；检索也要能在「假编码器」下独立测试。
+  也不关心用的是哪家 LLM。新增工具只碰 `agent/`（实现 + 在 `registry.py` 注册），
+  检索与模型两侧都不用动。
+- **`llm/`、`embeddings/`、`retrieval/`、`graph/` 分开放**：四者失败模式和伸缩性完全不同。
+  LLM 挂了不该拖垮检索；检索要能在「假编码器」下独立测试；图谱查询失败只该让一个工具失败。
+- **`graph/` 独立于 `retrieval/`**：数据形态不同（结构化关系 vs 文档片段），
+  访问方式不同（只读事务 + Cypher vs 向量检索），失败语义也不同——
+  混在一起会让「检索降级」这种精细处理被图谱的连接问题污染。
 - **`ingestion/` 与 `retrieval/` 分离**：入库是批处理 + CLI，检索是每请求异步，
-  两者只共享 `ids.py` 和 `qdrant_store.py`。
+  两者只共享 `ids.py` 和 `qdrant_store.py`。图谱入库同理放在 `data/batch/to_neo4j.py`
+  （离线脚本，不入包）。
 - **`schemas.py` 放在顶层而非 `api/` 下**：SSE 事件模型被 API 层和前端
   `lib/types.ts` 同时消费，线上格式只有一个地方可查。
-- **`integrations/` 单独成目录**：第二阶段的东西集中放，一眼能看出「还没实现」。
+- **`integrations/` 单独成目录**：仍未实现的集成集中放（当前只剩联网搜索），
+  一眼能看出「还没实现」；PostgreSQL 与 Neo4j 实现后已分别移入 `db/` 与 `graph/`。
 
 ## 关键约束（改代码前必读）
 

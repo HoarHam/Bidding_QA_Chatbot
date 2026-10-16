@@ -7,15 +7,12 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
-from bidding_qa_chatbot.agent.base import ToolRegistry, ToolResult, ToolSpec
+from bidding_qa_chatbot.agent.base import ToolResult, ToolSpec
 from bidding_qa_chatbot.config import Settings, get_settings
 from bidding_qa_chatbot.retrieval.service import RetrievedSource, Retriever
-
-logger = logging.getLogger(__name__)
 
 #: 回灌给模型的单条资料最大长度。太长会挤占上下文，也拖慢生成。
 MAX_SNIPPET_CHARS = 1200
@@ -137,11 +134,3 @@ class RagSearchTool:
                 )
             blocks.append(block)
         return "\n\n".join(blocks)
-
-
-def build_default_registry(retriever: Retriever, settings: Settings | None = None) -> ToolRegistry:
-    """构造默认工具集。新增工具在这里注册即可，Agent 循环无需改动。"""
-    registry = ToolRegistry()
-    registry.register(RagSearchTool(retriever, settings))
-    logger.info("已注册工具: %s", registry.names)
-    return registry

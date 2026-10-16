@@ -30,6 +30,10 @@ from bidding_qa_chatbot.retrieval.qdrant_store import build_client, collection_m
 
 logger = logging.getLogger(__name__)
 
+#: 图谱启动探活的独立超时。驱动的 connection_timeout 是 60s，直接 await 会让
+#: Neo4j 不可用时启动白等一分钟；探活失败只记日志、不阻止启动。
+GRAPH_PROBE_TIMEOUT = 3.0
+
 
 def _describe_db_url(url: str) -> str:
     """把连接串转成可安全打日志的形态（**不含凭据**）。"""
@@ -67,6 +71,8 @@ def build_agent(
     reranker: Any,
     bm25_artifact: Any,
     collection_vocab_sha1: str | None,
+    *,
+    graph: Any = None,
 ) -> Any:
     """构造 Agent（未启用时返回 None）。
 
@@ -76,6 +82,9 @@ def build_agent(
     模型缺失时正确的做法是让工具返回一条明确的失败信息（模型据此如实告知用户），
     而不是切到固定检索路径——那条路径在缺 encoder 时是**直接 503** 的，
     切过去只会把「部分可用」变成「完全不可用」。
+
+    `graph`（GraphService）只在 ENABLE_NEO4J=true 时非 None；为 None 时
+    不注册图谱工具（功能关闭时模型不该看到一个永远不可用的工具）。
 
     抽成独立函数是为了可测：这条逻辑曾经写反过，且只在运行时才暴露。
     """
@@ -94,7 +103,7 @@ def build_agent(
         bm25_artifact=bm25_artifact,
         collection_vocab_sha1=collection_vocab_sha1,
     )
-    agent = RagAgent(chain, build_default_registry(retriever, settings), settings)
+    agent = RagAgent(chain, build_default_registry(retriever, settings, graph=graph), settings)
     logger.info("Agent 已启用，工具: %s", agent.registry.names)
     if not retriever.available:
         logger.warning(
@@ -140,6 +149,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 但检索与健康检查仍然可用，便于排查问题。
         logger.error("数据库连接失败（登录与对话历史将不可用）: %s", redact(str(db_err)))
 
+    # ---- 知识图谱（Neo4j）：仅在 ENABLE_NEO4J=true 时接入 ----
+    app.state.graph = None
+    if settings.enable_neo4j:
+        from bidding_qa_chatbot.graph import GraphService, build_driver, probe_with_timeout
+
+        app.state.graph = GraphService(build_driver(settings), settings)
+        graph_ok, graph_err = await probe_with_timeout(app.state.graph, GRAPH_PROBE_TIMEOUT)
+        if graph_ok:
+            # 连接串本身不含凭据（build_driver 走 auth=），可安全打日志
+            logger.info(
+                "知识图谱已连接: %s（数据库 %s）", settings.neo4j_uri, settings.neo4j_database
+            )
+        else:
+            # 与数据库同样的处理：连不上不阻止启动。工具仍然注册——它会给模型一条
+            # 可转述的失败信息；不注册的话模型会转而凭记忆编造交易数据。
+            logger.error(
+                "知识图谱连接失败（查询工具会返回明确的不可用提示）: %s", redact(str(graph_err))
+            )
+    else:
+        logger.info("ENABLE_NEO4J 未开启：知识图谱查询工具不注册")
+
     # BM25 工件与集合元数据：用于判断稀疏一路能否安全使用。
     app.state.bm25 = bm25_mod.load_artifact(settings.extracted_dir / "bm25.json")
     app.state.collection_vocab_sha1 = None
@@ -177,6 +207,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.reranker,
         app.state.bm25,
         app.state.collection_vocab_sha1,
+        graph=app.state.graph,
     )
 
     app.state.settings = settings
@@ -189,6 +220,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.qdrant.close()
         with contextlib.suppress(Exception):
             await app.state.db.dispose()
+        # Neo4j 驱动关闭失败同样不该影响进程退出
+        graph = getattr(app.state, "graph", None)
+        if graph is not None:
+            with contextlib.suppress(Exception):
+                await graph.close()
         # provider 关闭失败不该影响进程退出
         with contextlib.suppress(Exception):
             await app.state.chain.aclose()
@@ -198,7 +234,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_logging()
     app = FastAPI(
         title="招投标智能问答机器人",
-        description="第一阶段：RAG（混合检索 + 精排 + 可切换 LLM）",
+        description="RAG（混合检索 + 精排）+ Agent 工具调用（知识库检索 / Neo4j 知识图谱查询）",
         version="0.1.0",
         lifespan=lifespan,
     )

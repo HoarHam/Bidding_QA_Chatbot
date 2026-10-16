@@ -6,9 +6,9 @@
 `/api/health/deps` 才做逐项可达性探测，且各项独立超时并发执行，
 一个挂掉的依赖不能拖住整个端点。
 
-第二阶段的 Neo4j / PostgreSQL 用**裸 TCP 连接**探测：既能回答「通不通」，
-又完全不需要安装 `neo4j` / `psycopg` / `sqlalchemy` 驱动，
-使它们能留在 `[project.optional-dependencies].phase2` 里。
+数据库类依赖（PostgreSQL / Neo4j）做**真实鉴权探测**而非裸 TCP：
+端口通不代表库存在、凭据正确、数据已就绪。代价是驱动成为硬依赖——
+两者都已经提升为主依赖；只有还没实现的联网搜索（Tavily/Exa）仍是桩。
 """
 
 from __future__ import annotations
@@ -162,8 +162,37 @@ async def _probe_database(settings: Settings, db: Any = None) -> DepHealth:
     )
 
 
+async def _probe_graph(settings: Settings, graph: Any = None) -> DepHealth:
+    """探测知识图谱（Neo4j）。
+
+    同样比 TCP 严格：端口通不代表数据库存在、凭据正确。走驱动的真实连接
+    （`RETURN 1`）+ 独立超时（驱动 connection_timeout 是 60s，不能直连等）。
+    `graph` 为 None 时（CLI 路径）临时建一个驱动，用完关掉。
+    """
+    if not settings.enable_neo4j:
+        return DepHealth(
+            name="neo4j", status="not_configured", message="未启用（ENABLE_NEO4J=false）"
+        )
+
+    from bidding_qa_chatbot.graph import GraphService, build_driver, probe_with_timeout
+
+    if graph is None:
+        temp = GraphService(build_driver(settings), settings)
+        try:
+            ok, error = await probe_with_timeout(temp, PROBE_TIMEOUT)
+        finally:
+            with contextlib.suppress(Exception):
+                await temp.close()
+    else:
+        ok, error = await probe_with_timeout(graph, PROBE_TIMEOUT)
+
+    if ok:
+        return DepHealth(name="neo4j", status="ok")
+    return DepHealth(name="neo4j", status="unavailable", message=redact(str(error))[:200])
+
+
 async def probe_all(
-    settings: Settings, client: httpx.AsyncClient, db: Any = None
+    settings: Settings, client: httpx.AsyncClient, db: Any = None, graph: Any = None
 ) -> list[DepHealth]:
     """并发探测所有依赖。CLI 的 `check` 与 `/api/health/deps` 共用这一份实现。"""
     tasks = [
@@ -189,15 +218,10 @@ async def probe_all(
         ),
     ]
 
-    if settings.enable_neo4j:
-        host, port = _host_port(settings.neo4j_uri, 7687)
-        tasks.append(_probe_tcp("neo4j", host, port))
-    else:
-        tasks.append(_not_configured("neo4j"))
-
-    # 数据库是实打实的功能依赖（账号 + 对话历史），不只做 TCP 探测：
-    # 端口通不代表库存在、凭据正确、表已建好。
-    tasks.append(_probe_database(settings))
+    # 数据库与图谱都是实打实的功能依赖（账号/历史、图谱查询），
+    # 不只做 TCP 探测：端口通不代表库存在、凭据正确、数据已就绪。
+    tasks.append(_probe_graph(settings, graph))
+    tasks.append(_probe_database(settings, db))
 
     return list(await asyncio.gather(*tasks))
 
@@ -217,13 +241,18 @@ async def health_deps(request: Request) -> HealthResponse:
     settings: Settings = request.app.state.settings
     client: httpx.AsyncClient = request.app.state.http
 
-    deps = await probe_all(settings, client, getattr(request.app.state, "db", None))
+    deps = await probe_all(
+        settings,
+        client,
+        getattr(request.app.state, "db", None),
+        getattr(request.app.state, "graph", None),
+    )
     overall = "ok" if all(d.status in ("ok", "not_configured") for d in deps) else "degraded"
     return HealthResponse(status=overall, deps=deps)
 
 
 async def _not_configured(name: str) -> DepHealth:
-    return DepHealth(name=name, status="not_configured", message="第二阶段功能，本阶段未启用")
+    return DepHealth(name=name, status="not_configured", message="未启用")
 
 
 @router.get("/stats", response_model=StatsResponse)

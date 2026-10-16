@@ -10,11 +10,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from bidding_qa_chatbot.agent import build_default_registry
 from bidding_qa_chatbot.agent.agent import (
     AgentDone,
     RagAgent,
@@ -303,6 +306,115 @@ async def test_multiple_tool_calls_in_one_turn_all_execute():
     tool_msgs = [m for m in chain.requests[1].messages if m.role == "tool"]
     assert len(tool_msgs) == 2
     assert {m.tool_call_id for m in tool_msgs} == {"c1", "c2"}
+
+
+# ---------------------------------------------------------------- 图谱工具接入 Agent
+def test_default_registry_registers_graph_only_when_provided():
+    reg_without = build_default_registry(FakeRetriever([]), _settings())
+    assert reg_without.names == ["search_bidding_knowledge"]
+
+    graph = SimpleNamespace(available=True)
+    reg_with = build_default_registry(FakeRetriever([]), _settings(), graph=graph)
+    assert reg_with.names == ["search_bidding_knowledge", "query_bidding_graph"]
+
+
+async def test_graph_tool_display_and_summary():
+    """图谱调用的界面展示：动作名 + 实体锚点；摘要优先用工具自报的 artifacts['summary']。"""
+    chain = FakeChain(
+        [
+            {
+                "tool_calls": [
+                    _call("query_bidding_graph", '{"subject_matter":"空调","aspect":"overview"}')
+                ]
+            },
+            {"content": ["空调的交易频次是 179。"]},
+        ]
+    )
+    reg = ToolRegistry()
+    reg.register(
+        FakeTool(
+            "query_bidding_graph",
+            ToolResult(
+                name="query_bidding_graph",
+                content="【知识图谱·标的物概览】…",
+                artifacts={"summary": "知识图谱查询到 1 条结果", "graph": {"rows": 1}},
+            ),
+        )
+    )
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+
+    call = next(i for i in items if isinstance(i, ToolCallNotice))
+    assert call.display.startswith("查询知识图谱：")
+    assert "空调" in call.display
+
+    result = next(i for i in items if isinstance(i, ToolResultNotice))
+    # 图谱结果没有 sources；若走老的「按 sources 计数」逻辑会误显示成「未检索到相关内容」
+    assert result.summary == "知识图谱查询到 1 条结果"
+    assert result.sources == []
+
+
+async def test_cypher_display_is_single_line_and_truncated():
+    cypher = (
+        "MATCH (s:SubjectMatter)\nWHERE s.name CONTAINS $kw\n"
+        "RETURN s.name AS name, s.tradeFrequency AS trade_frequency LIMIT 3"
+    )
+    chain = FakeChain(
+        [
+            {"tool_calls": [_call("query_bidding_graph", json.dumps({"cypher": cypher}))]},
+            {"content": ["答案"]},
+        ]
+    )
+    reg = ToolRegistry()
+    reg.register(FakeTool("query_bidding_graph"))
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+
+    call = next(i for i in items if isinstance(i, ToolCallNotice))
+    assert "\n" not in call.display
+    assert call.display.startswith("查询知识图谱：MATCH (s:SubjectMatter) WHERE")
+    assert len(call.display) <= len("查询知识图谱：") + 40 + 1
+
+
+async def test_graph_error_codes_have_chinese_labels():
+    reg = ToolRegistry()
+    reg.register(
+        FakeTool(
+            "query_bidding_graph",
+            ToolResult(
+                name="query_bidding_graph", content="x", ok=False, error="graph_unavailable"
+            ),
+        )
+    )
+    chain = FakeChain([{"tool_calls": [_call("query_bidding_graph", "{}")]}, {"content": ["好"]}])
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+    result = next(i for i in items if isinstance(i, ToolResultNotice))
+    assert result.summary == "知识图谱不可用"
+
+
+async def test_agent_loop_reinjects_graph_tool_result():
+    chain = FakeChain(
+        [
+            {"tool_calls": [_call("query_bidding_graph", '{"subject_matter":"空调"}', "g1")]},
+            {"content": ["空调的交易频次是 179。"]},
+        ]
+    )
+    reg = ToolRegistry()
+    reg.register(
+        FakeTool(
+            "query_bidding_graph",
+            ToolResult(name="query_bidding_graph", content="【知识图谱】交易频次 179"),
+        )
+    )
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+
+    tool_msg = next(m for m in chain.requests[1].messages if m.role == "tool")
+    assert tool_msg.tool_call_id == "g1"
+    assert "知识图谱" in tool_msg.content
+    done = next(i for i in items if isinstance(i, AgentDone))
+    assert done.finish_reason == "stop"
 
 
 # ---------------------------------------------------------------- RAG 工具

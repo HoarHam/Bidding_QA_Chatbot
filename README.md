@@ -1,16 +1,22 @@
 ## 项目名称
 
-招投标智能问答机器人（第一阶段：RAG）
+招投标智能问答机器人
 
-基于检索增强生成的招投标 / 政府采购领域问答系统。把 Excel 中的问答语料入库到向量库，
-用「稠密语义 + BM25 关键词」混合检索召回、CrossEncoder 精排，再交给可自动回退的大模型
-流式作答，并在界面上展示参考来源。
+基于检索增强生成 + 知识图谱的招投标 / 政府采购领域问答系统。把 Excel 中的问答语料入库到
+向量库，用「稠密语义 + BM25 关键词」混合检索召回、CrossEncoder 精排；招投标交易事实
+（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）存在 Neo4j 知识图谱里。
+两者都注册为 Agent 工具，由大模型根据问题自行选择，再交给可自动回退的 LLM 流式作答，
+并在界面上展示参考来源与工具调用过程。
 
-**检索已注册为工具**：Agent 会根据问题自行判断是否需要查知识库——问招投标业务问题
-会先检索再作答并标注出处，闲聊则直接回答。检索过程在界面上可见。
+**两个工具，按问题类型自动路由**：
 
-> 当前为第一阶段，只实现基础 RAG。第二阶段（Neo4j 知识图谱、PostgreSQL 会话记录、
-> Tavily / Exa 联网搜索）已在 `.env` 中预留配置并写好接口桩，尚未实现。
+- `search_bidding_knowledge`——法规条款、期限、门槛、资格条件等规范性知识（检索 + 标注出处）；
+- `query_bidding_graph`——具体交易事实与统计（先查 Neo4j，再依据查询结果作答）；
+- 两类都涉及的问题会先后调用两个工具；闲聊直接回答。过程在界面上可见。
+
+> 状态：RAG 检索、账号与对话历史（PostgreSQL）、知识图谱查询（Neo4j，`ENABLE_NEO4J=true`）
+> 均已实现。仍为接口桩的只有 Tavily / Exa 联网搜索。图谱数据由
+> `data/batch/to_neo4j.py` 注入（可重复执行）。
 
 ## 运行条件
 
@@ -61,13 +67,23 @@ cd frontend && npm install # 前端
    会读取 `data/processed/问题答案样例数据0113.xlsx`（80 条问答 + 3 张内嵌图片），
    用视觉模型解析图片内容，编码后写入 Qdrant。重复执行是幂等的。
 
-5. **启动后端**：
+5. **知识图谱入库**（可选；需要图谱问答时必做）：
+
+   ```bash
+   # .env 配好 NEO4J_* 并设 ENABLE_NEO4J=true
+   uv run python data/batch/to_neo4j.py
+   ```
+
+   读取 `data/processed/` 下的两份 CSV（标的物交易频次、招标采购标的物信息），
+   注入 Neo4j 的 `BiddingRelations` 库。重复执行是幂等的。
+
+6. **启动后端**：
 
    ```bash
    uv run bidding-qa-chatbot serve          # http://127.0.0.1:8001 ，文档 /docs
    ```
 
-6. **启动前端**（另开终端）：
+7. **启动前端**（另开终端）：
 
    ```bash
    cd frontend && npm run dev               # http://localhost:3000
@@ -103,6 +119,7 @@ flowchart LR
     RET --> QD[("Qdrant<br/>bid_qa")]
     RET --> EMB["bge-small-zh-v1.5<br/>512 维"]
     RET --> RRK["bge-reranker-base"]
+    AG -->|"query_bidding_graph"| KG[("Neo4j<br/>BiddingRelations")]
     AG --> LLM["LLM 链<br/>deepseek → zhipu → vLLM"]
 ```
 
@@ -111,6 +128,7 @@ flowchart LR
 | 后端 | FastAPI + Uvicorn + Pydantic v2 |
 | 前端 | Next.js（App Router）+ React + TypeScript + TailwindCSS v4 |
 | 向量库 | Qdrant Named Vectors 混合检索（Prefetch + RRF） |
+| 知识图谱 | Neo4j（异步驱动；参数化模板 + 只读 Cypher 兜底，读事务执行） |
 | 嵌入 / 精排 | `BAAI/bge-small-zh-v1.5`（512 维）/ `BAAI/bge-reranker-base` |
 | 稀疏检索 | jieba 分词 + BM25（自实现，词表持久化） |
 | 大模型 | DeepSeek（OpenAI SDK）+ 智谱（zai-sdk），失败自动回退 |

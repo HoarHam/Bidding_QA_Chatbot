@@ -46,6 +46,20 @@ _ENV_KEYS = (
     "VLLM_API_KEY",
     "VLLM_MODEL",
     "ENABLE_INGEST_ENDPOINT",
+    # Neo4j：`load_dotenv` 会把 .env 里的真实地址/密码写进 os.environ，
+    # 而 `Settings(_env_file=None)` 仍会读到；不清掉的话每个测试都会
+    # 静默拿到 enable_neo4j=True 与实际凭据。
+    "NEO4J_URI",
+    "NEO4J_USERNAME",
+    "NEO4J_PASSWORD",
+    "NEO4J_DATABASE",
+    "NEO4J_MAX_CONNECTION_LIFETIME",
+    "NEO4J_MAX_CONNECTION_POOL_SIZE",
+    "NEO4J_CONNECTION_TIMEOUT",
+    "NEO4J_QUERY_TIMEOUT",
+    "NEO4J_CONNECTION_ACQUISITION_TIMEOUT",
+    "NEO4J_MAX_ROWS",
+    "ENABLE_NEO4J",
 )
 
 

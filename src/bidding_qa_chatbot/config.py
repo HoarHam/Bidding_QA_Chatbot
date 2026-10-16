@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7  # 7 天
     password_min_length: int = 8
 
-    # ---------- 第二阶段：仅配置与可达性探测，不实现业务逻辑 ----------
+    # ---------- 知识图谱：Neo4j（已实现，见 bidding_qa_chatbot/graph/） ----------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: SecretStr | None = None
@@ -151,6 +151,15 @@ class Settings(BaseSettings):
     neo4j_max_connection_lifetime: int = 3600
     neo4j_max_connection_pool_size: int = 50
     neo4j_connection_timeout: int = 60
+    # 服务端事务超时（秒）。与 connection_timeout 是两件事：后者是建连/握手超时（60s），
+    # 前者限制单次查询在数据库侧的执行时长。
+    neo4j_query_timeout: float = 8.0
+    # 从连接池取连接的最长等待时间。驱动默认 60s——在 SSE 流里等 60s 等于界面卡死。
+    neo4j_connection_acquisition_timeout: float = 10.0
+    # 单次查询返回的最大行数（服务层硬上限；工具参数 limit 不能超过它）
+    neo4j_max_rows: int = 100
+
+    # ---------- 第二阶段：仅配置与可达性探测，不实现业务逻辑 ----------
     postgres_user: str | None = None
     postgres_password: SecretStr | None = None
     postgres_host: str = "localhost"
@@ -276,4 +285,6 @@ def validate_runtime(settings: Settings) -> list[str]:
             problems.append("DEEPSEEK_API_KEY 未配置")
         if provider == "zhipu" and settings.zhipu_api_key is None:
             problems.append("ZHIPU_API_KEY 未配置")
+    if settings.enable_neo4j and settings.neo4j_password is None:
+        problems.append("ENABLE_NEO4J=true 但 NEO4J_PASSWORD 未配置（知识图谱查询不可用）")
     return problems

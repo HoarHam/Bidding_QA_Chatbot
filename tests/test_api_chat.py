@@ -324,6 +324,31 @@ def test_agent_not_built_when_disabled():
     )
 
 
+def test_agent_registers_graph_tool_only_when_service_provided():
+    """图谱工具只在传入 GraphService 时注册（ENABLE_NEO4J=false 时模型不该看到它）。"""
+    from types import SimpleNamespace
+
+    from bidding_qa_chatbot.api.app import build_agent
+
+    settings = _settings()
+    settings.agent_enabled = True
+    common = {
+        "chain": object(),
+        "qdrant": object(),
+        "encoder": None,
+        "reranker": None,
+        "bm25_artifact": None,
+        "collection_vocab_sha1": None,
+    }
+
+    with_graph = build_agent(settings, **common, graph=SimpleNamespace(available=True))
+    assert "query_bidding_graph" in with_graph.registry.names
+    assert with_graph.registry.names == ["search_bidding_knowledge", "query_bidding_graph"]
+
+    without = build_agent(settings, **common)
+    assert "query_bidding_graph" not in without.registry.names
+
+
 async def test_assistant_answer_with_sources_is_persisted(client_factory):
     """回归守卫：**带引用来源**的回答必须能落库。
 

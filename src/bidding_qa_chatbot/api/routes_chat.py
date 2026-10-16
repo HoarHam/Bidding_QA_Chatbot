@@ -188,7 +188,12 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     if use_agent:
         from bidding_qa_chatbot.llm.prompts import build_agent_messages
 
-        source_iter = agent.astream(build_agent_messages(body.query, body.history), body.mode)
+        # 系统提示词必须与注册表一致：只有图谱工具真的注册了才在提示词里提它
+        graph_enabled = "query_bidding_graph" in agent.registry
+        source_iter = agent.astream(
+            build_agent_messages(body.query, body.history, graph_enabled=graph_enabled),
+            body.mode,
+        )
     else:
         result = await _retrieve(request, body)
         initial_sources = [s.to_ref() for s in result.sources]

@@ -44,6 +44,10 @@ dependencies = [
     # PyJWT 之前是 zai-sdk 的传递依赖，这里显式声明，避免上游换实现时被动
     "pyjwt>=2.9,<3",
     "bcrypt>=4.2,<5",
+    # --- 知识图谱：Neo4j（第二阶段已实现）---
+    # 6.x 是当前维护线；锁 <7 避免大版本漂移（6.0 移除了 tx.run(timeout=) 这类旧写法，
+    # 说明大版本会改 API）。本机实测 6.3.1。
+    "neo4j>=6.3,<7",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +55,7 @@ dependencies = [
 notebook = ["ipykernel>=7.3,<8"]
 # 第二阶段才会安装；本阶段仅代码里有接口桩，不做真实连接
 phase2 = [
-    "neo4j>=5",
+    # sqlalchemy/psycopg 已提升为主依赖（Postgres 已实现），此处为历史遗留
     "sqlalchemy>=2",
     "psycopg[binary]>=3",
     "tavily-python>=0.5",

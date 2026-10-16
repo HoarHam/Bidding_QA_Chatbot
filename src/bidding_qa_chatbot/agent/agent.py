@@ -73,17 +73,43 @@ AgentItem = (
 )
 
 
+#: 工具名 → 给用户看的中文动作名。加新工具时在这里补一行。
+_TOOL_DISPLAY_LABELS = {
+    "search_bidding_knowledge": "检索知识库",
+    "query_bidding_graph": "查询知识图谱",
+}
+
+#: 展示用参数：按顺序取第一个非空值。`query` 必须排第一，
+#: 否则既有检索工具在界面上的展示会退化。
+_DISPLAY_ARG_KEYS = (
+    "query",
+    "subject_matter",
+    "supplier",
+    "purchaser",
+    "agency",
+    "location",
+    "cypher",
+)
+_DISPLAY_VALUE_CHARS = 40
+
+
 def _display_for(name: str, args: dict[str, Any]) -> str:
     """给用户看的一句话，避免把原始 JSON 直接怼到界面上。
 
-    通用地识别 `query` 参数：任何检索类工具都该把它显示出来，
-    不要按工具名硬编码——加一个新检索工具时很容易忘记同步。
+    标签查 `_TOOL_DISPLAY_LABELS`（缺省「调用 {name}」）；
+    展示参数按 `_DISPLAY_ARG_KEYS` 逐个取第一个非空值——按「参数角色」而不是
+    按工具名硬编码，加新工具时多数情况下无需再改这里。
     """
-    query = str(args.get("query", "")).strip()
-    if not query:
-        return f"调用工具 {name}"
-    label = "检索知识库" if name == "search_bidding_knowledge" else f"调用 {name}"
-    return f"{label}：{query}"
+    label = _TOOL_DISPLAY_LABELS.get(name, f"调用 {name}")
+    for key in _DISPLAY_ARG_KEYS:
+        value = str(args.get(key) or "").strip()
+        if not value:
+            continue
+        value = " ".join(value.split())  # cypher 可能带换行
+        if len(value) > _DISPLAY_VALUE_CHARS:
+            value = value[:_DISPLAY_VALUE_CHARS] + "…"
+        return f"{label}：{value}"
+    return label
 
 
 class RagAgent:
@@ -206,12 +232,23 @@ _TOOL_ERROR_LABELS = {
     "empty_query": "查询为空",
     "unknown_tool": "工具不存在",
     "bad_arguments": "参数错误",
+    "graph_unavailable": "知识图谱不可用",
+    "graph_timeout": "知识图谱查询超时",
+    "graph_query_failed": "知识图谱查询失败",
+    "invalid_cypher": "Cypher 被拒绝（只允许只读查询）",
+    "conflicting_arguments": "参数冲突",
+    "unknown_aspect": "查询类型未知",
 }
 
 
 def _summarize(result: Any) -> str:
     if not result.ok:
         return _TOOL_ERROR_LABELS.get(result.error or "", "调用失败")
+    # 工具可以自报用户可见摘要（artifacts["summary"]，如图谱工具）；
+    # 没有时按检索语义计数（既有检索工具的行为，保持不变）。
+    explicit = str(result.artifacts.get("summary") or "").strip()
+    if explicit:
+        return explicit
     count = len(result.artifacts.get("sources") or [])
     if count == 0:
         return "未检索到相关内容"

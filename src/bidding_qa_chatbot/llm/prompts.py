@@ -24,7 +24,7 @@ SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问答助�
 NO_CONTEXT_REPLY = "根据知识库无法确定：本次检索没有找到与问题相关的资料。"
 
 
-AGENT_SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问答助手，可以使用工具检索内部知识库。
+_AGENT_SYSTEM_HEAD = """你是一名招投标与政府采购领域的专业问答助手，可以使用工具检索内部知识库。
 
 工作方式：
 1. 先判断问题是否属于招投标/政府采购领域，以及是否需要查阅法规或事实性依据。
@@ -36,7 +36,23 @@ AGENT_SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问�
 4. 引用具体规则时，在句末用 `[来源：source_label]` 标注出处，source_label
    必须与资料中给出的完全一致。
 5. 与招投标无关的闲聊可以直接回答，不需要调用工具。
+"""
 
+#: 图谱工具启用时（ENABLE_NEO4J=true 且工具已注册）追加的说明。
+#: 工具未注册时**不能**提它，否则模型会试图调用一个不存在的工具。
+AGENT_GRAPH_PROMPT = """
+另外，涉及**具体交易事实与统计**时，必须先调用 query_bidding_graph 查询招投标知识图谱，
+不要凭印象估算或编造，例如：
+- 某标的物（空调、打印/复印纸、网上超市采购等）的交易频次、交易笔数、中标金额；
+- 某供应商/采购人/代理机构/地区与哪些标的物有关联；
+- 某标的物的中标供应商、采购人、代理机构、所在地。
+一个问题两类工具都涉及（既问规则、又问具体数据）时，两个工具都要调用，再综合作答；
+工具返回空结果时如实说「没有查到」，不要用记忆补充。
+图谱工具优先用结构化参数（subject_matter / supplier / purchaser / agency / location
+搭配 aspect）；若它返回「匹配到多个候选」，先向用户确认是哪一个，不要自行猜测作答。
+"""
+
+_AGENT_SYSTEM_TAIL = """
 输出要求：简体中文，条理清晰；适合用表格呈现的内容（对比、时限、金额档位）请用 Markdown 表格。
 不要复述这些要求，不要写「根据您提供的资料」之类的套话，直接回答。
 
@@ -44,12 +60,22 @@ AGENT_SYSTEM_PROMPT = """你是一名招投标与政府采购领域的专业问�
 那会混进最终回答里。直接发起工具调用，等拿到资料后再一次性作答。
 """
 
+#: 无图谱时的完整系统提示词（图谱说明由 build_agent_messages 按需插在中间）
+AGENT_SYSTEM_PROMPT = _AGENT_SYSTEM_HEAD + _AGENT_SYSTEM_TAIL
 
-def build_agent_messages(query: str, history: list | None = None) -> list:
-    """Agent 路径的消息：不预置资料，由模型自行决定是否检索。"""
+
+def build_agent_messages(
+    query: str, history: list | None = None, *, graph_enabled: bool = False
+) -> list:
+    """Agent 路径的消息：不预置资料，由模型自行决定是否检索。
+
+    `graph_enabled` 由图谱工具是否已注册决定（routes_chat 传入）——
+    提示词必须与注册表一致，不能提一个模型调不到的工具。
+    """
     from bidding_qa_chatbot.llm.base import ChatMessage
 
-    messages = [ChatMessage(role="system", content=AGENT_SYSTEM_PROMPT)]
+    system = _AGENT_SYSTEM_HEAD + (AGENT_GRAPH_PROMPT if graph_enabled else "") + _AGENT_SYSTEM_TAIL
+    messages = [ChatMessage(role="system", content=system)]
     for turn in history or []:
         messages.append(ChatMessage(role=turn.role, content=turn.content))
     messages.append(ChatMessage(role="user", content=query))
