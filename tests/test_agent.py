@@ -107,6 +107,13 @@ async def _collect(agent: RagAgent, msgs=None):
     return out
 
 
+async def _collect_kw(agent: RagAgent, **kwargs):
+    out = []
+    async for item in agent.astream([ChatMessage(role="user", content="问题")], **kwargs):
+        out.append(item)
+    return out
+
+
 # ---------------------------------------------------------------- 工具注册表
 def test_registry_schemas_are_openai_shaped():
     reg = ToolRegistry()
@@ -415,6 +422,96 @@ async def test_agent_loop_reinjects_graph_tool_result():
     assert "知识图谱" in tool_msg.content
     done = next(i for i in items if isinstance(i, AgentDone))
     assert done.finish_reason == "stop"
+
+
+# ---------------------------------------------------------------- 联网搜索工具接入 Agent
+def test_default_registry_registers_web_tools_when_available():
+    web_keyword = SimpleNamespace(keyword_available=True, semantic_available=False)
+    reg = build_default_registry(FakeRetriever([]), _settings(), web_search=web_keyword)
+    assert reg.names == ["search_bidding_knowledge", "search_web_keyword"]
+
+    web_semantic = SimpleNamespace(keyword_available=False, semantic_available=True)
+    reg2 = build_default_registry(FakeRetriever([]), _settings(), web_search=web_semantic)
+    assert reg2.names == ["search_bidding_knowledge", "search_web_semantic"]
+
+
+async def test_allowed_tools_filters_schemas():
+    chain = FakeChain([{"content": ["答案"]}])
+    reg = ToolRegistry()
+    reg.register(FakeTool("t1"))
+    reg.register(FakeTool("t2"))
+
+    await _collect_kw(RagAgent(chain, reg, _settings()), allowed_tools={"t1"})
+
+    names = [tool["function"]["name"] for tool in chain.requests[0].tools]
+    assert names == ["t1"]
+
+
+async def test_disallowed_tool_is_not_executed_even_if_model_asks():
+    """只过滤 schema 不够：模型幻构/越权点名时执行侧也必须拒绝。"""
+    denied = FakeTool("t2", raises=AssertionError("被禁用的工具不该执行"))
+    reg = ToolRegistry()
+    reg.register(FakeTool("t1"))
+    reg.register(denied)
+    chain = FakeChain([{"tool_calls": [_call("t2", "{}")]}, {"content": ["改用其他方式作答"]}])
+
+    items = await _collect_kw(RagAgent(chain, reg, _settings()), allowed_tools={"t1"})
+
+    result = next(i for i in items if isinstance(i, ToolResultNotice))
+    assert result.ok is False
+    assert result.summary == "工具未启用"
+    assert denied.calls == []
+
+    tool_msg = next(m for m in chain.requests[1].messages if m.role == "tool")
+    assert "未启用" in tool_msg.content
+
+
+async def test_web_tool_display_labels():
+    chain = FakeChain(
+        [
+            {"tool_calls": [_call("search_web_keyword", '{"query":"2026 政府采购 新规"}')]},
+            {"content": ["答案"]},
+        ]
+    )
+    reg = ToolRegistry()
+    reg.register(FakeTool("search_web_keyword"))
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+    call = next(i for i in items if isinstance(i, ToolCallNotice))
+    assert call.display.startswith("联网搜索（关键词）：")
+    assert "政府采购" in call.display
+
+
+async def test_web_sources_flow_into_notice():
+    web_source = {
+        "url": "https://example.com/a",
+        "title": "标题",
+        "snippet": "摘要",
+        "score": 0.9,
+        "engine": "tavily",
+        "published_date": None,
+    }
+    reg = ToolRegistry()
+    reg.register(
+        FakeTool(
+            "search_web_keyword",
+            ToolResult(
+                name="search_web_keyword",
+                content="【联网搜索结果】…",
+                artifacts={"web_sources": [web_source], "summary": "联网搜索到 1 条结果"},
+            ),
+        )
+    )
+    chain = FakeChain(
+        [{"tool_calls": [_call("search_web_keyword", '{"query":"q"}')]}, {"content": ["答案"]}]
+    )
+
+    items = await _collect(RagAgent(chain, reg, _settings()))
+    result = next(i for i in items if isinstance(i, ToolResultNotice))
+
+    assert result.web_sources == [web_source]
+    assert result.sources == []
+    assert result.summary == "联网搜索到 1 条结果"
 
 
 # ---------------------------------------------------------------- RAG 工具

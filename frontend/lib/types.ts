@@ -16,6 +16,8 @@ export interface ChatMessage {
 export interface ChatRequest {
   query: string;
   mode?: Mode;
+  /** 用户是否在本轮开启联网搜索（前端开关）。仅当服务端也启用时才真正生效。 */
+  web_search?: boolean;
   top_k?: number | null;
   history?: ChatMessage[];
   /** 续接已有会话时传入；为空则新建一个会话。 */
@@ -40,6 +42,17 @@ export interface SourceRef {
   /** 展示给用户的相关性分数（CrossEncoder）。 */
   rerank_score: number | null;
   images: SourceImage[];
+}
+
+/** 联网搜索的一条结果（与本地知识库来源分开，参考来源面板分区展示）。 */
+export interface WebSource {
+  url: string;
+  title: string;
+  snippet: string;
+  /** 引擎给出的相关度（0..1 语义）；Exa 回退到 basic 工具时可能为 null。 */
+  score: number | null;
+  engine: "tavily" | "exa";
+  published_date: string | null;
 }
 
 export interface SourceDetail {
@@ -118,11 +131,20 @@ export interface StatsResponse {
   embed_model: string;
   rerank_model: string;
   rerank_enabled: boolean;
+  /** 服务端是否具备联网搜索能力（开关 + 至少一个引擎的密钥就绪）。 */
+  web_search_available: boolean;
 }
 
 // ---------------------------------------------------------------- SSE 载荷
 export interface SourcesEvent {
   sources: SourceRef[];
+  retrieved: number;
+  elapsed_ms: number;
+}
+
+/** Agent 联网搜索结果。与 `sources` 事件分开推送，前端按类型分区渲染。 */
+export interface WebSourcesEvent {
+  sources: WebSource[];
   retrieved: number;
   elapsed_ms: number;
 }
@@ -218,6 +240,8 @@ export interface MessageOut {
   content: string;
   reasoning: string | null;
   sources: SourceRef[];
+  /** 联网搜索来源（与本地来源分开返回）。 */
+  web_sources: WebSource[];
   provider: string | null;
   model: string | null;
   created_at: string;

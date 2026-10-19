@@ -20,10 +20,12 @@ import type {
   SourcesEvent,
   ToolCallEvent,
   ToolResultEvent,
+  WebSourcesEvent,
 } from "./types";
 
 export type SSEHandler = {
   onSources?: (e: SourcesEvent) => void;
+  onWebSources?: (e: WebSourcesEvent) => void;
   onProvider?: (e: ProviderEvent) => void;
   onFallback?: (e: FallbackEvent) => void;
   onReasoning?: (e: DeltaEvent) => void;
@@ -72,6 +74,9 @@ function dispatch(frame: Frame, handler: SSEHandler): void {
   switch (frame.event) {
     case "sources":
       handler.onSources?.(payload as SourcesEvent);
+      break;
+    case "web_sources":
+      handler.onWebSources?.(payload as WebSourcesEvent);
       break;
     case "provider":
       handler.onProvider?.(payload as ProviderEvent);

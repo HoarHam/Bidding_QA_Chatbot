@@ -126,19 +126,19 @@ async function main() {
 
   // ---------- 交互可用性（对应「客户端 JS 未接管」那类故障）----------
   const thinking = page.getByRole("button", { name: "深度思考" });
-  const fast = page.getByRole("button", { name: "快速" });
   const before = await thinking.getAttribute("aria-pressed");
   await thinking.click();
   await page.waitForTimeout(300);
-  const afterThinking = await thinking.getAttribute("aria-pressed");
-  const afterFast = await fast.getAttribute("aria-pressed");
+  const afterOn = await thinking.getAttribute("aria-pressed");
   check(
-    "模式切换响应点击",
-    before !== afterThinking && afterThinking === "true" && afterFast === "false",
-    `深度思考 ${before} -> ${afterThinking}`,
+    "深度思考开关响应点击（默认关闭）",
+    before === "false" && afterOn === "true",
+    `深度思考 ${before} -> ${afterOn}`,
   );
-  await fast.click();
+  await thinking.click();
   await page.waitForTimeout(200);
+  const afterOff = await thinking.getAttribute("aria-pressed");
+  check("再次点击切回快速模式", afterOff === "false", `深度思考 -> ${afterOff}`);
 
   // ---------- 示例问题：真实文本、可点击填入 ----------
   const chip = page.getByRole("button", { name: /单一来源异议被驳回/ });

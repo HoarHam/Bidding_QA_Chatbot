@@ -23,6 +23,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     mode: Mode = "fast"
+    #: 用户是否在本轮开启联网搜索（前端开关）。仅当服务端也启用时才真正生效。
+    web_search: bool = False
     top_k: int | None = Field(default=None, ge=1, le=50)
     # 只带最近若干轮作为上下文；完整历史在服务端按 conversation_id 落库。
     history: list[ChatMessage] = Field(default_factory=list, max_length=12)
@@ -48,6 +50,22 @@ class SourceRef(BaseModel):
     rrf_score: float
     rerank_score: float | None = None
     images: list[SourceImage] = Field(default_factory=list)
+
+
+class WebSource(BaseModel):
+    """联网搜索的一条结果。
+
+    与 `SourceRef`（本地知识库）刻意分开：联网结果没有 chunk_id / 精排分数，
+    也不应该伪装成本地语料。前端「参考来源」面板按类型分区展示。
+    """
+
+    url: str
+    title: str
+    snippet: str
+    #: 引擎给出的相关度（0..1 语义）。Exa 回退到 basic 工具时可能缺失。
+    score: float | None = None
+    engine: Literal["tavily", "exa"]
+    published_date: str | None = None
 
 
 class Usage(BaseModel):
@@ -110,6 +128,14 @@ class ApiErrorResponse(BaseModel):
 # 事件名 → data 载荷。前端按 event 名分发，不做字符串嗅探。
 class SourcesEvent(BaseModel):
     sources: list[SourceRef]
+    retrieved: int
+    elapsed_ms: int
+
+
+class WebSourcesEvent(BaseModel):
+    """Agent 联网搜索结果。与 `sources` 事件分开推送，前端按类型分区渲染。"""
+
+    sources: list[WebSource]
     retrieved: int
     elapsed_ms: int
 
@@ -222,6 +248,9 @@ class MessageOut(BaseModel):
     content: str
     reasoning: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
+    #: 联网搜索来源。落库时与本地来源同存于 messages.sources（带 kind="web" 标记），
+    #: 读取时在这里分流，旧数据（无标记）仍按本地来源解析。
+    web_sources: list[WebSource] = Field(default_factory=list)
     provider: str | None = None
     model: str | None = None
     created_at: datetime
@@ -274,3 +303,6 @@ class StatsResponse(BaseModel):
     embed_model: str
     rerank_model: str
     rerank_enabled: bool
+    #: 服务端是否具备联网搜索能力（开关 + 至少一个引擎的密钥就绪）。
+    #: 前端据此把「联网搜索」开关置灰，而不是让用户开了开关却静默无效。
+    web_search_available: bool

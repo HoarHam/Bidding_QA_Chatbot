@@ -124,7 +124,7 @@ uv run python -c "import yaml,io; yaml.safe_load(io.open('.workflow/ci.yml',enco
 
 | 目标 | 需要的补充 |
 |---|---|
-| ECS 主机 | 主机组 + `VMDeploy` 步骤；需装 Python 3.12 与 Node 运行时 |
+| ECS 主机 | 主机组 + `VMDeploy` 步骤；需装 Python 3.12 与 Node 运行时（Node 20+ 也用于 Exa 的 npx MCP 回退；主路径只用 HTTPS API，不依赖 Node） |
 | 容器服务 ACK | 先写 Dockerfile，构建镜像推 ACR，再部署 Deployment |
 | 函数计算 FC | 后端需适配 FC 入口约定，前端可走静态托管 |
 

@@ -107,3 +107,16 @@ def test_hf_endpoint_exported_to_environ(monkeypatch):
     s = _settings(hf_endpoint="https://hf-mirror.com")
     assert s.hf_endpoint == "https://hf-mirror.com"
     assert os.environ.get("HF_ENDPOINT") == "https://hf-mirror.com"
+
+
+def test_validate_runtime_requires_web_search_keys_when_enabled():
+    problems = validate_runtime(
+        _settings(enable_web_search=True, tavily_api_key=None, exa_api_key=None)
+    )
+    assert any("TAVILY_API_KEY" in p for p in problems)
+    assert any("EXA_API_KEY" in p for p in problems)
+
+
+def test_validate_runtime_ignores_web_keys_when_disabled():
+    problems = validate_runtime(_settings(enable_web_search=False))
+    assert not [p for p in problems if "WEB_SEARCH" in p]

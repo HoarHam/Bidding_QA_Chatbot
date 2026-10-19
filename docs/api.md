@@ -21,23 +21,27 @@
 请求：
 
 ```json
-{"query": "投标保证金的退还期限是多久？", "mode": "fast", "history": [], "top_k": null}
+{"query": "投标保证金的退还期限是多久？", "mode": "fast", "web_search": false, "history": [], "top_k": null}
 ```
 
-`mode` 取 `fast` 或 `thinking`。响应为 `text/event-stream`，使用**具名事件**
-（前端按事件名分发，不做字符串嗅探）。
+`mode` 取 `fast` 或 `thinking`。`web_search` 为用户端「联网搜索」开关：
+只有当服务端 `ENABLE_WEB_SEARCH=true` 且本请求为 `true` 时，模型才会看到联网工具；
+关闭时联网工具既不进 schema，也无法被执行。前端用 `/api/stats` 的
+`web_search_available` 判断开关是否可点（服务端不可用时置灰）。响应为
+`text/event-stream`，使用**具名事件**（前端按事件名分发，不做字符串嗅探）。
 
 **Agent 路径（默认）**的事件顺序：
 
 ```
-tool_call → tool_result → sources → provider → (token | reasoning)* → done
+tool_call → tool_result → (sources | web_sources) → provider → (token | reasoning)* → done
 ```
 
 模型认为不需要检索时（如闲聊），不会有 `tool_call` / `tool_result` / `sources`，
-直接 `provider → token* → done`。多轮检索时 `tool_call`/`tool_result`/`sources` 会重复出现。
+直接 `provider → token* → done`。多轮检索时 `tool_call`/`tool_result`/`sources`/
+`web_sources` 会重复出现；**来源帧携带累计列表**（多轮工具调用不会清空面板）。
 
 **老路径（`AGENT_ENABLED=false`）**：`sources → provider → token* → done`，
-来源在任何 token 之前发出。
+来源在任何 token 之前发出；该路径忽略 `web_search`。
 
 ```
 event: tool_call
@@ -54,6 +58,9 @@ data: {"name":"search_bidding_knowledge","ok":true,"elapsed_ms":412,"summary":"�
 ```
 event: sources
 data: {"sources":[{"chunk_id":"qa0113-0015","source_label":"招投标问答样例数据0113 · 第17行","question":"...","snippet":"...","excel_row":17,"rrf_score":1.0,"rerank_score":0.997,"images":[]}],"retrieved":5,"elapsed_ms":412}
+
+event: web_sources
+data: {"sources":[{"url":"https://example.com/a","title":"政府采购新规解读","snippet":"...","score":0.87,"engine":"tavily","published_date":"2026-09-01"}],"retrieved":3,"elapsed_ms":512}
 
 event: provider
 data: {"provider":"deepseek","model":"deepseek-flash","mode":"fast","thinking_enabled":false}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Brain, Send, Square, Zap } from "lucide-react";
+import { Brain, Globe, Send, Square } from "lucide-react";
 
 import type { Mode } from "@/lib/types";
 
@@ -36,12 +36,18 @@ export default function Composer({
   busy,
   mode,
   onModeChange,
+  webSearch,
+  onWebSearchChange,
+  webSearchAvailable,
 }: {
   onSend: (text: string) => void;
   onStop: () => void;
   busy: boolean;
   mode: Mode;
   onModeChange: (m: Mode) => void;
+  webSearch: boolean;
+  onWebSearchChange: (enabled: boolean) => void;
+  webSearchAvailable: boolean;
 }) {
   const [text, setText] = useState("");
   const canSend = text.trim().length > 0 && !busy;
@@ -90,36 +96,48 @@ export default function Composer({
       />
 
       <div className="mt-1 flex items-center justify-between gap-2 px-1">
-        <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-0.5">
+        <div className="flex items-center gap-1.5">
+          {/* 深度思考开关：默认快速模式（未选中、置灰）；点一下切到深度思考，再点回快速 */}
           <button
             type="button"
-            onClick={() => onModeChange("fast")}
-            aria-pressed={mode === "fast"}
-            className={`cursor-pointer rounded-md px-2 py-1 text-[11px] transition ${
-              mode === "fast"
-                ? "bg-white font-medium text-slate-800 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            <span className="inline-flex items-center gap-1">
-              <Zap className="size-3" />
-              快速
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onModeChange("thinking")}
+            onClick={() => onModeChange(mode === "thinking" ? "fast" : "thinking")}
             aria-pressed={mode === "thinking"}
-            className={`cursor-pointer rounded-md px-2 py-1 text-[11px] transition ${
+            title={
               mode === "thinking"
-                ? "bg-white font-medium text-slate-800 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+                ? "当前为深度思考模式，点击切回快速"
+                : "开启深度思考（模型先推理再作答，更慢但更稳）"
+            }
+            className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition ${
+              mode === "thinking"
+                ? "border-sky-300 bg-sky-50 font-medium text-sky-700"
+                : "border-slate-200 bg-white text-slate-500 hover:border-sky-300 hover:text-sky-700"
             }`}
           >
-            <span className="inline-flex items-center gap-1">
-              <Brain className="size-3" />
-              深度思考
-            </span>
+            <Brain className="size-3" />
+            深度思考
+          </button>
+
+          {/* 联网搜索开关：服务端不具备能力时置灰并提示，避免「开了却静默无效」 */}
+          <button
+            type="button"
+            onClick={() => onWebSearchChange(!webSearch)}
+            aria-pressed={webSearch}
+            disabled={!webSearchAvailable}
+            title={
+              webSearchAvailable
+                ? "开启后允许模型联网检索公开信息（仅在需要时调用）"
+                : "服务端未启用联网搜索"
+            }
+            className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+              webSearch && webSearchAvailable
+                ? "border-sky-300 bg-sky-50 font-medium text-sky-700"
+                : webSearchAvailable
+                  ? "border-slate-200 bg-white text-slate-500 hover:border-sky-300 hover:text-sky-700"
+                  : "border-slate-200 bg-white text-slate-400"
+            }`}
+          >
+            <Globe className="size-3" />
+            联网搜索
           </button>
         </div>
 

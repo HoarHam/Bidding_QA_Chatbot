@@ -46,10 +46,20 @@ AGENT_GRAPH_PROMPT = """
 - 某标的物（空调、打印/复印纸、网上超市采购等）的交易频次、交易笔数、中标金额；
 - 某供应商/采购人/代理机构/地区与哪些标的物有关联；
 - 某标的物的中标供应商、采购人、代理机构、所在地。
-一个问题两类工具都涉及（既问规则、又问具体数据）时，两个工具都要调用，再综合作答；
+一个问题同时涉及法规和具体交易数据时，知识库与图谱两个工具都要调用，再综合作答；
 工具返回空结果时如实说「没有查到」，不要用记忆补充。
 图谱工具优先用结构化参数（subject_matter / supplier / purchaser / agency / location
 搭配 aspect）；若它返回「匹配到多个候选」，先向用户确认是哪一个，不要自行猜测作答。
+"""
+
+#: 用户本轮开启联网搜索、且联网工具已注册时追加的说明。
+AGENT_WEB_SEARCH_PROMPT = """
+另外，用户已开启**联网搜索**。涉及时效性强的外部公开信息（最新政策/新闻/公告、
+本地知识库与知识图谱覆盖不到的内容）时，可以调用联网搜索工具：
+- `search_web_keyword`：关键词搜索，适合具体名词、数字与公告的核实（查询用关键词组合）；
+- `search_web_semantic`：语义搜索，适合概念性、开放式、多角度的问题（查询用完整问句）。
+优先使用本地知识库与知识图谱；联网结果为空或不可用时如实说明，不要编造。
+引用联网结果时在句末标注 `[来源：URL]`，URL 必须来自工具返回的结果。
 """
 
 _AGENT_SYSTEM_TAIL = """
@@ -65,16 +75,26 @@ AGENT_SYSTEM_PROMPT = _AGENT_SYSTEM_HEAD + _AGENT_SYSTEM_TAIL
 
 
 def build_agent_messages(
-    query: str, history: list | None = None, *, graph_enabled: bool = False
+    query: str,
+    history: list | None = None,
+    *,
+    graph_enabled: bool = False,
+    web_search_enabled: bool = False,
 ) -> list:
     """Agent 路径的消息：不预置资料，由模型自行决定是否检索。
 
-    `graph_enabled` 由图谱工具是否已注册决定（routes_chat 传入）——
-    提示词必须与注册表一致，不能提一个模型调不到的工具。
+    `graph_enabled` / `web_search_enabled` 由「该工具在本请求中是否真正可用」决定
+    （routes_chat 传入）——提示词必须与本次提供的工具集合一致，
+    不能提一个模型调不到的工具。
     """
     from bidding_qa_chatbot.llm.base import ChatMessage
 
-    system = _AGENT_SYSTEM_HEAD + (AGENT_GRAPH_PROMPT if graph_enabled else "") + _AGENT_SYSTEM_TAIL
+    system = (
+        _AGENT_SYSTEM_HEAD
+        + (AGENT_GRAPH_PROMPT if graph_enabled else "")
+        + (AGENT_WEB_SEARCH_PROMPT if web_search_enabled else "")
+        + _AGENT_SYSTEM_TAIL
+    )
     messages = [ChatMessage(role="system", content=system)]
     for turn in history or []:
         messages.append(ChatMessage(role=turn.role, content=turn.content))

@@ -6,13 +6,14 @@
 flowchart TD
     Page["app/page.tsx<br/>Server Component<br/>SSR 拉取 /api/stats"] --> Shell["ChatShell<br/>Client · 状态机"]
     Shell --> List["MessageList<br/>滚动 + 回到底部"]
-    Shell --> Composer["Composer<br/>输入 + 模式切换"]
-    Shell --> Panel["SourcesPanel<br/>参考来源"]
+    Shell --> Composer["Composer<br/>输入 + 模式切换 + 联网搜索开关"]
+    Shell --> Panel["SourcesPanel<br/>参考来源（本地 / 联网分区）"]
     List --> Bubble["MessageBubble"]
     Bubble --> Thinking["ThinkingPanel<br/>深度思考（折叠）"]
     Bubble --> MD["Markdown<br/>react-markdown + gfm"]
     Bubble --> Err["ErrorBanner<br/>错误 + 重试"]
-    Panel --> Card["SourceCard<br/>标签 + 摘要 + 相关性 + 图片"]
+    Panel --> Card["SourceCard<br/>本地：标签 + 摘要 + 相关性 + 图片"]
+    Panel --> WebCard["WebSourceCard<br/>联网：可跳转 URL + 引擎 + 相关度"]
 ```
 
 ## Server / Client 边界
@@ -76,13 +77,23 @@ React 严格模式会双调用副作用，从 effect 里开流会导致同一条
 
 ## 参考来源
 
-`sources` 事件在第一个 token 之前到达，所以来源面板在答案还在输出时就已经填好。
+`sources` / `web_sources` 事件在答案 token 之前或工具调用后到达，所以来源面板在答案
+还在输出时就已经填好。面板分两段：
 
-每张卡片展示：序号 → `source_label` → 命中的问题 → 三行摘要 → 相关性条 → 图片缩略图。
+- **本地知识库**（`SourceCard`）：序号 → `source_label` → 命中的问题 → 三行摘要 →
+  相关性条 → 图片缩略图。
+- **联网搜索**（`WebSourceCard`，独立 testid `web-source-card`）：序号 → 可跳转标题
+  （`target="_blank" rel="noreferrer"`）→ 域名 → 三行摘要 → 引擎徽标（Tavily/Exa）→
+  相关度条。没有评分的 Exa MCP 回退结果不渲染评分条。
 
 **只展示 `rerank_score`，且不称作「置信度」。**
 `rrf_score` 是排名融合的产物，量纲与余弦相似度不同（本地模式还会归一化），
-把它显示成百分比会误导用户。
+把它显示成百分比会误导用户。联网结果的 `score` 来自搜索引擎本身，语义不同，
+因此单独分区展示，不与本地评分混排。
+
+输入区底部有两个并排的开关：**深度思考**（默认关闭 = 快速模式，点击切换）与
+**联网搜索**（服务端能力来自 `/api/stats` 的 `web_search_available`，不可用时置灰
+并给出 tooltip）。两者状态都跨发送保持。
 
 ## 深度思考
 

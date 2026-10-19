@@ -452,14 +452,148 @@ def test_accumulate_dedupes_sources_by_chunk_id():
     answer: list = []
     reasoning: list = []
     sources: list = []
+    web_sources: list = []
     finished: dict = {}
 
-    _accumulate(notice(["a", "b"]), answer, reasoning, sources, finished)
-    _accumulate(notice(["b", "c"]), answer, reasoning, sources, finished)
+    _accumulate(notice(["a", "b"]), answer, reasoning, sources, web_sources, finished)
+    _accumulate(notice(["b", "c"]), answer, reasoning, sources, web_sources, finished)
 
     assert [s.chunk_id for s in sources] == ["a", "b", "c"], "重复来源没有被去掉"
     # 去重后必须仍是 SourceRef（可 JSON 序列化），这是能落库的前提
     assert sources[0].__class__.__name__ == "SourceRef"
+
+
+def test_accumulate_dedupes_web_sources_by_url():
+    """联网来源按 URL 去重（与本地来源的 chunk_id 去重互不干扰）。"""
+    from bidding_qa_chatbot.agent.agent import ToolResultNotice
+    from bidding_qa_chatbot.api.routes_chat import _accumulate
+
+    def web(url: str) -> dict:
+        return {
+            "url": url,
+            "title": "t",
+            "snippet": "s",
+            "score": 0.5,
+            "engine": "tavily",
+            "published_date": None,
+        }
+
+    def notice(urls: list[str]) -> ToolResultNotice:
+        return ToolResultNotice(
+            name="search_web_keyword",
+            ok=True,
+            elapsed_ms=1,
+            summary="",
+            web_sources=[web(u) for u in urls],
+        )
+
+    answer: list = []
+    reasoning: list = []
+    sources: list = []
+    web_sources: list = []
+    finished: dict = {}
+
+    _accumulate(
+        notice(["https://a", "https://b"]), answer, reasoning, sources, web_sources, finished
+    )
+    _accumulate(
+        notice(["https://b", "https://c"]), answer, reasoning, sources, web_sources, finished
+    )
+
+    assert [s.url for s in web_sources] == ["https://a", "https://b", "https://c"]
+    assert web_sources[0].__class__.__name__ == "WebSource"
+    assert sources == []
+
+
+def test_frames_for_emits_cumulative_sources_and_web_sources():
+    """多轮工具调用时 sources / web_sources 帧携带**累计**列表。"""
+    from bidding_qa_chatbot.agent.agent import ToolResultNotice
+    from bidding_qa_chatbot.api.routes_chat import _frames_for
+    from bidding_qa_chatbot.schemas import SourceRef, WebSource
+
+    kb = SourceRef(
+        chunk_id="c1",
+        source_label="l",
+        question="q",
+        snippet="s",
+        excel_row=1,
+        rrf_score=0.1,
+        rerank_score=0.9,
+        images=[],
+    )
+    web = WebSource(url="https://a", title="t", snippet="s", score=0.7, engine="tavily")
+    notice = ToolResultNotice(
+        name="search_web_keyword",
+        ok=True,
+        elapsed_ms=5,
+        summary="联网搜索到 1 条结果",
+        web_sources=[web.model_dump(mode="json")],
+    )
+
+    frames = _frames_for(notice, "conv-1", [kb], [web])
+
+    events: list[tuple[str, dict]] = []
+    for frame in frames:
+        lines = frame.strip().splitlines()
+        event = next(line[len("event: ") :] for line in lines if line.startswith("event: "))
+        data = next(line[len("data: ") :] for line in lines if line.startswith("data: "))
+        events.append((event, json.loads(data)))
+
+    assert [name for name, _ in events] == ["tool_result", "sources", "web_sources"]
+    by_name = dict(events)
+    assert [s["chunk_id"] for s in by_name["sources"]["sources"]] == ["c1"]
+    assert by_name["sources"]["retrieved"] == 1
+    assert by_name["web_sources"]["retrieved"] == 1
+    assert by_name["web_sources"]["sources"][0]["url"] == "https://a"
+    # tool_result 的 sources 仍是本地来源通道（联网结果不混入）
+    assert by_name["tool_result"]["sources"] == []
+
+
+def test_message_out_partitions_web_sources_and_tolerates_legacy_rows():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from bidding_qa_chatbot.api.routes_conversations import _message_out
+
+    kb = {
+        "chunk_id": "c1",
+        "source_label": "l",
+        "question": "q",
+        "snippet": "s",
+        "excel_row": 1,
+        "rrf_score": 0.1,
+        "rerank_score": 0.9,
+        "images": [],
+    }
+    web = {
+        "kind": "web",
+        "url": "https://a",
+        "title": "t",
+        "snippet": "s",
+        "score": 0.7,
+        "engine": "tavily",
+        "published_date": None,
+    }
+    msg = SimpleNamespace(
+        id=uuid.uuid4(),
+        role="assistant",
+        content="答案",
+        reasoning=None,
+        sources=[kb, web],
+        provider="deepseek",
+        model="m",
+        created_at=datetime.now(UTC),
+    )
+
+    out = _message_out(msg)
+    assert [s.chunk_id for s in out.sources] == ["c1"]
+    assert [s.url for s in out.web_sources] == ["https://a"]
+
+    # 旧数据（没有 kind 标记）仍按本地来源解析
+    legacy = SimpleNamespace(**{**msg.__dict__, "sources": [kb]})
+    legacy_out = _message_out(legacy)
+    assert [s.chunk_id for s in legacy_out.sources] == ["c1"]
+    assert legacy_out.web_sources == []
 
 
 def test_http_client_timeout_is_constructible():

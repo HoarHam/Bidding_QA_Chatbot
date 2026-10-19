@@ -7,8 +7,10 @@
 一个挂掉的依赖不能拖住整个端点。
 
 数据库类依赖（PostgreSQL / Neo4j）做**真实鉴权探测**而非裸 TCP：
-端口通不代表库存在、凭据正确、数据已就绪。代价是驱动成为硬依赖——
-两者都已经提升为主依赖；只有还没实现的联网搜索（Tavily/Exa）仍是桩。
+端口通不代表库存在、凭据正确、数据已就绪。
+
+联网搜索（Tavily / Exa）只做**配置级探测**（密钥是否配置、Exa 所需的 npx 是否存在）：
+搜索探活会消耗付费额度，不适合放进健康检查。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import shutil
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -191,6 +194,34 @@ async def _probe_graph(settings: Settings, graph: Any = None) -> DepHealth:
     return DepHealth(name="neo4j", status="unavailable", message=redact(str(error))[:200])
 
 
+async def _probe_tavily(settings: Settings) -> DepHealth:
+    """Tavily 关键词搜索：只检查配置，不发付费请求。"""
+    if not settings.enable_web_search:
+        return DepHealth(
+            name="tavily", status="not_configured", message="未启用（ENABLE_WEB_SEARCH=false）"
+        )
+    if settings.tavily_api_key is None:
+        return DepHealth(name="tavily", status="not_configured", message="TAVILY_API_KEY 未配置")
+    return DepHealth(name="tavily", status="ok", message="已配置（不做付费探活）")
+
+
+async def _probe_exa(settings: Settings) -> DepHealth:
+    """Exa 语义搜索：主路径是 HTTP API，npx 只影响 MCP 回退能力。不发付费请求。"""
+    if not settings.enable_web_search:
+        return DepHealth(
+            name="exa", status="not_configured", message="未启用（ENABLE_WEB_SEARCH=false）"
+        )
+    if settings.exa_api_key is None:
+        return DepHealth(name="exa", status="not_configured", message="EXA_API_KEY 未配置")
+    if shutil.which("npx") is None:
+        return DepHealth(
+            name="exa",
+            status="ok",
+            message="已配置（主路径 Exa API；未找到 npx，MCP 回退不可用）",
+        )
+    return DepHealth(name="exa", status="ok", message="已配置（不做付费探活）")
+
+
 async def probe_all(
     settings: Settings, client: httpx.AsyncClient, db: Any = None, graph: Any = None
 ) -> list[DepHealth]:
@@ -222,6 +253,9 @@ async def probe_all(
     # 不只做 TCP 探测：端口通不代表库存在、凭据正确、数据已就绪。
     tasks.append(_probe_graph(settings, graph))
     tasks.append(_probe_database(settings, db))
+    # 联网搜索只做配置级探测（密钥 / npx），不消耗付费额度
+    tasks.append(_probe_tavily(settings))
+    tasks.append(_probe_exa(settings))
 
     return list(await asyncio.gather(*tasks))
 
@@ -266,6 +300,11 @@ async def stats(request: Request) -> StatsResponse:
     except Exception as exc:  # noqa: BLE001
         logger.warning("读取集合点数失败: %s", redact(str(exc)))
 
+    # 前端据此决定「联网搜索」开关是否可点：服务端不可用时置灰，
+    # 避免用户开了开关却静默无效。
+    web_search = getattr(request.app.state, "web_search", None)
+    web_search_available = bool(web_search is not None and web_search.available)
+
     return StatsResponse(
         collection=settings.qdrant_collection,
         vector_size=settings.qdrant_vector_size,
@@ -274,4 +313,5 @@ async def stats(request: Request) -> StatsResponse:
         embed_model=settings.embed_model_name,
         rerank_model=settings.rerank_model_name,
         rerank_enabled=settings.rerank_enabled,
+        web_search_available=web_search_available,
     )

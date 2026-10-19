@@ -73,6 +73,7 @@ def build_agent(
     collection_vocab_sha1: str | None,
     *,
     graph: Any = None,
+    web_search: Any = None,
 ) -> Any:
     """构造 Agent（未启用时返回 None）。
 
@@ -103,7 +104,11 @@ def build_agent(
         bm25_artifact=bm25_artifact,
         collection_vocab_sha1=collection_vocab_sha1,
     )
-    agent = RagAgent(chain, build_default_registry(retriever, settings, graph=graph), settings)
+    agent = RagAgent(
+        chain,
+        build_default_registry(retriever, settings, graph=graph, web_search=web_search),
+        settings,
+    )
     logger.info("Agent 已启用，工具: %s", agent.registry.names)
     if not retriever.available:
         logger.warning(
@@ -170,6 +175,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("ENABLE_NEO4J 未开启：知识图谱查询工具不注册")
 
+    # ---- 联网搜索：Tavily（关键词）+ Exa MCP（语义） ----
+    # 工具按引擎可用性分别注册；单轮是否可用由请求里的 web_search 开关再门控。
+    app.state.web_search = None
+    if settings.enable_web_search:
+        from bidding_qa_chatbot.web import WebSearchService
+
+        app.state.web_search = WebSearchService(settings, app.state.http)
+        if app.state.web_search.available:
+            logger.info(
+                "联网搜索已启用：Tavily=%s / Exa=%s",
+                "可用" if app.state.web_search.keyword_available else "不可用",
+                "可用" if app.state.web_search.semantic_available else "不可用",
+            )
+        else:
+            logger.warning("ENABLE_WEB_SEARCH=true 但没有任何可用的搜索引擎（检查密钥与 npx）")
+    else:
+        logger.info("ENABLE_WEB_SEARCH 未开启：联网搜索工具不注册")
+
     # BM25 工件与集合元数据：用于判断稀疏一路能否安全使用。
     app.state.bm25 = bm25_mod.load_artifact(settings.extracted_dir / "bm25.json")
     app.state.collection_vocab_sha1 = None
@@ -208,6 +231,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.bm25,
         app.state.collection_vocab_sha1,
         graph=app.state.graph,
+        web_search=app.state.web_search,
     )
 
     app.state.settings = settings
@@ -234,7 +258,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_logging()
     app = FastAPI(
         title="招投标智能问答机器人",
-        description="RAG（混合检索 + 精排）+ Agent 工具调用（知识库检索 / Neo4j 知识图谱查询）",
+        description=(
+            "RAG（混合检索 + 精排）+ Agent 工具调用（知识库检索 / Neo4j 知识图谱查询 / 联网搜索）"
+        ),
         version="0.1.0",
         lifespan=lifespan,
     )

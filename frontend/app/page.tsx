@@ -44,7 +44,7 @@ export default async function Page() {
         )}
       </header>
 
-      <ChatShell />
+      <ChatShell webSearchAvailable={stats?.web_search_available ?? false} />
     </main>
   );
 }

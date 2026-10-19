@@ -165,11 +165,24 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str | None = None
-    tavily_api_key: SecretStr | None = None
-    exa_api_key: SecretStr | None = None
     enable_neo4j: bool = False
     enable_postgres: bool = False
+
+    # ---------- 联网搜索：Tavily（关键词）+ Exa MCP（语义） ----------
+    tavily_api_key: SecretStr | None = None
+    exa_api_key: SecretStr | None = None
     enable_web_search: bool = False
+    # 工具参数 max_results 的硬上限（工具默认返回 5 条）
+    web_search_max_results: int = 10
+    # Tavily 请求超时（秒）
+    web_search_timeout: float = 20.0
+    # 进程内缓存（只缓存 Tavily 关键词搜索）：同一查询在 TTL 内直接复用
+    web_search_cache_ttl: float = 600.0
+    web_search_cache_maxsize: int = 128
+    # Exa MCP：每次调用拉起一个 npx 子进程（首次需下载包），超时给足；
+    # 并发子进程上限，防止多路对话同时拉起大量 node 进程。
+    exa_mcp_timeout: float = 30.0
+    exa_mcp_max_concurrency: int = 2
 
     # ---------- 路径 ----------
     data_dir: Path = Field(default=ROOT_DIR / "data")
@@ -287,4 +300,9 @@ def validate_runtime(settings: Settings) -> list[str]:
             problems.append("ZHIPU_API_KEY 未配置")
     if settings.enable_neo4j and settings.neo4j_password is None:
         problems.append("ENABLE_NEO4J=true 但 NEO4J_PASSWORD 未配置（知识图谱查询不可用）")
+    if settings.enable_web_search:
+        if settings.tavily_api_key is None:
+            problems.append("ENABLE_WEB_SEARCH=true 但 TAVILY_API_KEY 未配置（关键词联网不可用）")
+        if settings.exa_api_key is None:
+            problems.append("ENABLE_WEB_SEARCH=true 但 EXA_API_KEY 未配置（语义联网不可用）")
     return problems

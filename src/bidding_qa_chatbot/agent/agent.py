@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from bidding_qa_chatbot.agent.base import ToolRegistry
+from bidding_qa_chatbot.agent.base import ToolRegistry, ToolResult
 from bidding_qa_chatbot.config import Settings, get_settings
 from bidding_qa_chatbot.llm.base import (
     AllProvidersFailed,
@@ -55,6 +55,8 @@ class ToolResultNotice:
     elapsed_ms: int
     summary: str
     sources: list[dict[str, Any]] = field(default_factory=list)
+    #: 联网搜索来源（与本地知识库 sources 分开走，前端分区渲染）
+    web_sources: list[dict[str, Any]] = field(default_factory=list)
     degraded: bool = False
 
 
@@ -77,6 +79,8 @@ AgentItem = (
 _TOOL_DISPLAY_LABELS = {
     "search_bidding_knowledge": "检索知识库",
     "query_bidding_graph": "查询知识图谱",
+    "search_web_keyword": "联网搜索（关键词）",
+    "search_web_semantic": "联网搜索（语义）",
 }
 
 #: 展示用参数：按顺序取第一个非空值。`query` 必须排第一，
@@ -127,8 +131,18 @@ class RagAgent:
         self,
         messages: list[ChatMessage],
         mode: str = "fast",
+        *,
+        allowed_tools: set[str] | None = None,
     ) -> AsyncIterator[AgentItem | AgentDone]:
+        """跑一轮 Agent。
+
+        `allowed_tools` 是本请求允许调用的工具集合（None = 全部允许）。
+        注册表是应用级单例，**不能按请求修改**；这里在发请求前过滤 schema，
+        并在执行侧同样校验——模型若点名一个未被允许的工具，不能真的执行。
+        """
         schemas = self.registry.schemas()
+        if allowed_tools is not None:
+            schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
         max_steps = max(1, self.settings.agent_max_steps)
         steps = 0
         total_tool_calls = 0
@@ -198,7 +212,19 @@ class RagAgent:
                 )
 
                 started = time.perf_counter()
-                result = await self.registry.execute(tc.name, args)
+                if allowed_tools is not None and tc.name not in allowed_tools:
+                    # 只过滤 schema 还不够：模型可能幻构/越权点名未启用的工具
+                    result = ToolResult(
+                        name=tc.name,
+                        ok=False,
+                        error="tool_not_enabled",
+                        content=(
+                            f"错误：工具 {tc.name} 本次请求未启用（用户没有开启对应功能）。"
+                            "请改用其他可用工具，或基于已有信息作答。"
+                        ),
+                    )
+                else:
+                    result = await self.registry.execute(tc.name, args)
                 if not result.elapsed_ms:
                     result.elapsed_ms = int((time.perf_counter() - started) * 1000)
 
@@ -208,6 +234,7 @@ class RagAgent:
                     elapsed_ms=result.elapsed_ms,
                     summary=_summarize(result),
                     sources=list(result.artifacts.get("sources") or []),
+                    web_sources=list(result.artifacts.get("web_sources") or []),
                     degraded=bool(result.artifacts.get("degraded")),
                 )
 
@@ -238,6 +265,10 @@ _TOOL_ERROR_LABELS = {
     "invalid_cypher": "Cypher 被拒绝（只允许只读查询）",
     "conflicting_arguments": "参数冲突",
     "unknown_aspect": "查询类型未知",
+    "web_search_unavailable": "联网搜索不可用",
+    "web_search_failed": "联网搜索失败",
+    "web_search_timeout": "联网搜索超时",
+    "tool_not_enabled": "工具未启用",
 }
 
 

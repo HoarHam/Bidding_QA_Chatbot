@@ -47,9 +47,12 @@ def test_frontend_types_mirror_backend_schemas():
         ("SourceRef", schemas.SourceRef),
         ("SourceImage", schemas.SourceImage),
         ("SourceDetail", schemas.SourceDetail),
+        ("WebSource", schemas.WebSource),
+        ("SourcesEvent", schemas.SourcesEvent),
+        ("WebSourcesEvent", schemas.WebSourcesEvent),
+        ("StatsResponse", schemas.StatsResponse),
         ("Usage", schemas.Usage),
         ("AttemptModel", schemas.AttemptModel),
-        ("SourcesEvent", schemas.SourcesEvent),
         ("ProviderEvent", schemas.ProviderEvent),
         ("ToolCallEvent", schemas.ToolCallEvent),
         ("ToolResultEvent", schemas.ToolResultEvent),
@@ -120,6 +123,7 @@ def test_sse_event_names_match_documented_set():
 
     for event_name in (
         "sources",
+        "web_sources",
         "provider",
         "fallback",
         "token",

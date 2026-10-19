@@ -2,21 +2,23 @@
 
 招投标智能问答机器人
 
-基于检索增强生成 + 知识图谱的招投标 / 政府采购领域问答系统。把 Excel 中的问答语料入库到
-向量库，用「稠密语义 + BM25 关键词」混合检索召回、CrossEncoder 精排；招投标交易事实
-（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）存在 Neo4j 知识图谱里。
-两者都注册为 Agent 工具，由大模型根据问题自行选择，再交给可自动回退的 LLM 流式作答，
-并在界面上展示参考来源与工具调用过程。
+基于检索增强生成 + 知识图谱 + 联网搜索的招投标 / 政府采购领域问答系统。把 Excel 中的
+问答语料入库到向量库，用「稠密语义 + BM25 关键词」混合检索召回、CrossEncoder 精排；
+招投标交易事实（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）存在
+Neo4j 知识图谱里；时效性强的外部公开信息可以开启联网搜索。全部能力都注册为 Agent 工具，
+由大模型根据问题自行选择，再交给可自动回退的 LLM 流式作答，并在界面上展示参考来源
+（本地知识库 / 联网搜索分区）与工具调用过程。
 
-**两个工具，按问题类型自动路由**：
+**四个工具，按问题类型自动路由**：
 
 - `search_bidding_knowledge`——法规条款、期限、门槛、资格条件等规范性知识（检索 + 标注出处）；
 - `query_bidding_graph`——具体交易事实与统计（先查 Neo4j，再依据查询结果作答）；
-- 两类都涉及的问题会先后调用两个工具；闲聊直接回答。过程在界面上可见。
+- `search_web_keyword`——Tavily 关键词联网搜索（用户开启「联网搜索」后可用）；
+- `search_web_semantic`——Exa 语义联网搜索（Exa HTTP API 为主、npx MCP 回退）。
 
-> 状态：RAG 检索、账号与对话历史（PostgreSQL）、知识图谱查询（Neo4j，`ENABLE_NEO4J=true`）
-> 均已实现。仍为接口桩的只有 Tavily / Exa 联网搜索。图谱数据由
-> `data/batch/to_neo4j.py` 注入（可重复执行）。
+> 状态：RAG 检索、账号与对话历史（PostgreSQL）、知识图谱查询（Neo4j，`ENABLE_NEO4J=true`）、
+> 联网搜索（`ENABLE_WEB_SEARCH=true`）均已实现。图谱数据由 `data/batch/to_neo4j.py`
+> 注入（可重复执行）。
 
 ## 运行条件
 
@@ -24,7 +26,7 @@
 |---|---|---|
 | Python | **3.12** | 已在 `.python-version` 锁定；3.13+ 缺少部分 ML 轮子 |
 | uv | 0.12+ | Python 包与虚拟环境管理 |
-| Node.js | 20+ | 前端运行时（开发时实测 24.x） |
+| Node.js | 20+ | 前端运行时；后端 Exa 的 MCP 回退也通过 npx 拉起（主路径是 Exa HTTP API） |
 | npm | 10+ | 前端包管理 |
 | Qdrant | Cloud 或本地 | 需要 **Named Vectors + Prefetch/RRF**（1.10+，实测云服务 1.19.1） |
 
@@ -120,6 +122,8 @@ flowchart LR
     RET --> EMB["bge-small-zh-v1.5<br/>512 维"]
     RET --> RRK["bge-reranker-base"]
     AG -->|"query_bidding_graph"| KG[("Neo4j<br/>BiddingRelations")]
+    AG -->|"search_web_keyword"| TV["Tavily<br/>关键词搜索"]
+    AG -->|"search_web_semantic"| EX["Exa<br/>语义搜索（API 主 / npx MCP 回退）"]
     AG --> LLM["LLM 链<br/>deepseek → zhipu → vLLM"]
 ```
 
@@ -129,6 +133,7 @@ flowchart LR
 | 前端 | Next.js（App Router）+ React + TypeScript + TailwindCSS v4 |
 | 向量库 | Qdrant Named Vectors 混合检索（Prefetch + RRF） |
 | 知识图谱 | Neo4j（异步驱动；参数化模板 + 只读 Cypher 兜底，读事务执行） |
+| 联网搜索 | Tavily（关键词，basic 深度 + 进程内缓存）/ Exa（语义，HTTP API 为主、npx MCP 回退） |
 | 嵌入 / 精排 | `BAAI/bge-small-zh-v1.5`（512 维）/ `BAAI/bge-reranker-base` |
 | 稀疏检索 | jieba 分词 + BM25（自实现，词表持久化） |
 | 大模型 | DeepSeek（OpenAI SDK）+ 智谱（zai-sdk），失败自动回退 |

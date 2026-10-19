@@ -59,6 +59,16 @@ Windows Schannel 在吊销服务器不可达时报 `CRYPT_E_REVOCATION_OFFLINE`�
 只差一个斜杠就会让 `uv.lock` 在下一次解析时把每条依赖的 `source` 行都改写一遍
 （不影响功能，但会产生无意义的 diff）。
 
+### 7. 联网搜索的联网路径
+
+- **Tavily** 与 **Exa 主路径**都走项目共享的 `httpx.AsyncClient`（`HTTP_TRUST_ENV=false`），
+  与 Qdrant 一致：直连可用，不要把系统代理加回去。
+- **Exa MCP 只是回退**：API 失败且本机有 `npx` 时才拉起 `npx -y exa-mcp-server`。
+  首次运行会下载 npm 包（几十秒），所以 MCP 超时默认 30s；主路径不受影响。
+- **Exa `/search` 只有 `type="neural"` 的响应带真实 `score`**；auto/keyword/fast 都没有。
+  MCP（auto）与 API（neural）的结果集实测不重叠，不要试图「另查一次再按 URL 补分」——
+  语义搜索因此以 API 为主。
+
 ## 测试
 
 ```bash

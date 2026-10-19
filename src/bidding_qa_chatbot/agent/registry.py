@@ -12,6 +12,7 @@ from typing import Any
 from bidding_qa_chatbot.agent.base import ToolRegistry
 from bidding_qa_chatbot.agent.graph_tool import GraphQueryTool
 from bidding_qa_chatbot.agent.rag_tool import RagSearchTool
+from bidding_qa_chatbot.agent.web_tools import WebSearchKeywordTool, WebSearchSemanticTool
 from bidding_qa_chatbot.config import Settings
 from bidding_qa_chatbot.retrieval.service import Retriever
 
@@ -23,6 +24,7 @@ def build_default_registry(
     settings: Settings | None = None,
     *,
     graph: Any | None = None,
+    web_search: Any | None = None,
 ) -> ToolRegistry:
     """构造默认工具集。
 
@@ -30,10 +32,19 @@ def build_default_registry(
     时模型不该看到一个永远不可用的工具。已注册但服务器宕机是另一回事：
     工具保留并返回明确的不可用提示（不注册的话模型会转而凭记忆编造交易数据，
     与 rag_tool 对「编码器缺失」的处理同一理由）。
+
+    `web_search`（`WebSearchService`）同理；两个联网引擎**按各自可用性分别注册**
+    （缺 key / 无 npx 的引擎不出现在工具列表里）。用户单轮是否能用它们，
+    由 `ChatRequest.web_search` 在请求层再做一次门控。
     """
     registry = ToolRegistry()
     registry.register(RagSearchTool(retriever, settings))
     if graph is not None:
         registry.register(GraphQueryTool(graph, settings))
+    if web_search is not None:
+        if web_search.keyword_available:
+            registry.register(WebSearchKeywordTool(web_search, settings))
+        if web_search.semantic_available:
+            registry.register(WebSearchSemanticTool(web_search, settings))
     logger.info("已注册工具: %s", registry.names)
     return registry

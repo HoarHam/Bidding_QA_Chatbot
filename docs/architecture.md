@@ -1,9 +1,10 @@
 # 系统架构
 
 问答语料入库到 Qdrant（稠密 + 稀疏混合检索、CrossEncoder 精排），招投标交易事实
-（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）注入 Neo4j 知识图谱。
-两者都注册为 Agent 工具，由可切换的 LLM 根据问题自行选择，流式作答并在前端展示
-参考来源与工具调用过程。
+（标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）注入 Neo4j 知识图谱，
+时效性强的外部公开信息可开启联网搜索（Tavily 关键词 / Exa 语义）。它们都注册为 Agent
+工具，由可切换的 LLM 根据问题自行选择，流式作答并在前端展示参考来源（本地/联网分区）
+与工具调用过程。
 
 ```mermaid
 flowchart LR
@@ -13,15 +14,18 @@ flowchart LR
 
     subgraph server["Python 后端 (FastAPI)"]
         API["API 层<br/>/api/chat/stream · SSE"]
-        AG["Agent 层<br/>工具调用循环"]
+        AG["Agent 层<br/>工具调用循环 + 按请求门控"]
         RET["检索层<br/>hybrid → RRF → rerank"]
         GR["图谱层<br/>只读事务 + 参数化模板"]
+        WEB["联网层<br/>Tavily 缓存 · Exa API/MCP"]
         LLM["LLM 层<br/>provider 链 + 回退"]
     end
 
     subgraph ext["外部依赖"]
         QD[("Qdrant Cloud<br/>bid_qa")]
         NEO[("Neo4j<br/>BiddingRelations")]
+        TV["Tavily API<br/>关键词搜索"]
+        EX["Exa API / npx MCP<br/>语义搜索"]
         DS["DeepSeek<br/>deepseek-flash"]
         ZP["智谱<br/>glm-4.7-flashx"]
         VL["vLLM<br/>本地（仅留接口）"]
@@ -40,6 +44,10 @@ flowchart LR
     RET --> RRK
     AG -->|"工具：query_bidding_graph"| GR
     GR --> NEO
+    AG -->|"工具：search_web_keyword"| WEB
+    AG -->|"工具：search_web_semantic"| WEB
+    WEB --> TV
+    WEB --> EX
     AG --> LLM
     LLM --> DS
     LLM -.降级.-> ZP
@@ -100,13 +108,16 @@ sequenceDiagram
 - **`graph/` 独立于 `retrieval/`**：数据形态不同（结构化关系 vs 文档片段），
   访问方式不同（只读事务 + Cypher vs 向量检索），失败语义也不同——
   混在一起会让「检索降级」这种精细处理被图谱的连接问题污染。
+- **`web/` 单独成层**：两个引擎的可用性、超时、缓存与降级各成体系（Tavily 有进程内缓存；
+  Exa 以 HTTP API 为主、npx MCP 为回退），且只在用户开启时才会被模型看到——
+  与检索/图谱共用工具协议，但不共享任何实现细节。
 - **`ingestion/` 与 `retrieval/` 分离**：入库是批处理 + CLI，检索是每请求异步，
   两者只共享 `ids.py` 和 `qdrant_store.py`。图谱入库同理放在 `data/batch/to_neo4j.py`
   （离线脚本，不入包）。
 - **`schemas.py` 放在顶层而非 `api/` 下**：SSE 事件模型被 API 层和前端
   `lib/types.ts` 同时消费，线上格式只有一个地方可查。
-- **`integrations/` 单独成目录**：仍未实现的集成集中放（当前只剩联网搜索），
-  一眼能看出「还没实现」；PostgreSQL 与 Neo4j 实现后已分别移入 `db/` 与 `graph/`。
+- **`integrations/` 已移除**：第二阶段全部实现后（PostgreSQL → `db/`，Neo4j → `graph/`，
+  联网搜索 → `web/`），不再有需要集中摆放的接口桩。
 
 ## 关键约束（改代码前必读）
 

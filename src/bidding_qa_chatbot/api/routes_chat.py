@@ -48,6 +48,8 @@ from bidding_qa_chatbot.schemas import (
     ToolCallEvent,
     ToolResultEvent,
     Usage,
+    WebSource,
+    WebSourcesEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,13 +139,29 @@ async def _persist_assistant(
     content: str,
     reasoning: str | None,
     sources: list,
+    web_sources: list,
     provider: str | None,
     model: str | None,
 ) -> None:
-    """落库助手回答。**失败只记日志，不影响已经发给用户的回答。**"""
+    """落库助手回答。**失败只记日志，不影响已经发给用户的回答。**
+
+    本地来源与联网来源同存于 `messages.sources`（JSON）：联网项带
+    `"kind": "web"` 标记，读取时在 `routes_conversations._message_out` 分流。
+    旧数据没有标记 → 按本地来源解析，向后兼容，不需要数据库迁移。
+    """
     if not content:
         return
     try:
+        combined = [
+            *sources,
+            *[
+                {
+                    "kind": "web",
+                    **(ws.model_dump(mode="json") if isinstance(ws, WebSource) else dict(ws)),
+                }
+                for ws in web_sources
+            ],
+        ]
         db = request.app.state.db
         async with db.session() as session:
             conversation = await repo.get_conversation(
@@ -157,7 +175,7 @@ async def _persist_assistant(
                 role="assistant",
                 content=content,
                 reasoning=reasoning,
-                sources=sources,
+                sources=combined,
                 provider=provider,
                 model=model,
             )
@@ -188,11 +206,23 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     if use_agent:
         from bidding_qa_chatbot.llm.prompts import build_agent_messages
 
-        # 系统提示词必须与注册表一致：只有图谱工具真的注册了才在提示词里提它
+        # 提示词与工具集合必须一致：只有真注册/真开启的工具才能出现在提示词里。
+        web_tools = {"search_web_keyword", "search_web_semantic"}
         graph_enabled = "query_bidding_graph" in agent.registry
+        web_enabled = bool(body.web_search and (web_tools & set(agent.registry.names)))
+        allowed_tools = set(agent.registry.names)
+        if not web_enabled:
+            # 用户没开联网搜索（或服务端没有可用引擎）：连 schema 都不给模型。
+            allowed_tools -= web_tools
         source_iter = agent.astream(
-            build_agent_messages(body.query, body.history, graph_enabled=graph_enabled),
+            build_agent_messages(
+                body.query,
+                body.history,
+                graph_enabled=graph_enabled,
+                web_search_enabled=web_enabled,
+            ),
             body.mode,
+            allowed_tools=allowed_tools,
         )
     else:
         result = await _retrieve(request, body)
@@ -227,6 +257,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     answer_parts: list[str] = []
     reasoning_parts: list[str] = []
     collected_sources: list = []
+    collected_web_sources: list = []
     finished = {"provider": None, "model": None}
 
     async def generate() -> AsyncIterator[str]:
@@ -253,8 +284,17 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     yield _mid_stream_frame(request_id, pending)
                     break
 
-                _accumulate(pending, answer_parts, reasoning_parts, collected_sources, finished)
-                for frame in _frames_for(pending, conversation_id):
+                _accumulate(
+                    pending,
+                    answer_parts,
+                    reasoning_parts,
+                    collected_sources,
+                    collected_web_sources,
+                    finished,
+                )
+                for frame in _frames_for(
+                    pending, conversation_id, collected_sources, collected_web_sources
+                ):
                     yield frame
                 if isinstance(pending, MidStreamError | AllProvidersFailed):
                     break
@@ -295,6 +335,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     content="".join(answer_parts),
                     reasoning="".join(reasoning_parts) or None,
                     sources=collected_sources,
+                    web_sources=collected_web_sources,
                     provider=finished["provider"],
                     model=finished["model"],
                 )
@@ -306,7 +347,14 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     )
 
 
-def _accumulate(item, answer: list, reasoning: list, sources: list, finished: dict) -> None:
+def _accumulate(
+    item,
+    answer: list,
+    reasoning: list,
+    sources: list,
+    web_sources: list,
+    finished: dict,
+) -> None:
     """把流中的条目累积成最终要落库的内容。"""
     from bidding_qa_chatbot.agent.agent import AgentDone, ToolResultNotice
 
@@ -317,20 +365,31 @@ def _accumulate(item, answer: list, reasoning: list, sources: list, finished: di
         # 再补一个限定词），两次命中同一个 chunk 就会出现重复条目——
         # 那不仅冗余，还会让前端以 chunk_id 为 key 渲染时触发
         # "Encountered two children with the same key"。
-        # 按 chunk_id 去重，保留首次出现（各路检索已按相关性排序）。
+        # 按 chunk_id（本地）/ url（联网）去重，保留首次出现。
         seen = {s.chunk_id for s in sources}
         for raw in item.sources:
             source = SourceRef.model_validate(raw)
             if source.chunk_id not in seen:
                 seen.add(source.chunk_id)
                 sources.append(source)
+        seen_urls = {s.url for s in web_sources}
+        for raw in item.web_sources:
+            web_source = WebSource.model_validate(raw)
+            if web_source.url not in seen_urls:
+                seen_urls.add(web_source.url)
+                web_sources.append(web_source)
     elif isinstance(item, (AgentDone, StreamEnd)):
         # 两者都带 provider/model：老路径收尾是 StreamEnd，Agent 路径是 AgentDone
         finished["provider"] = item.provider
         finished["model"] = item.model
 
 
-def _frames_for(item, conversation_id: str | None = None) -> list[str]:
+def _frames_for(
+    item,
+    conversation_id: str | None = None,
+    collected_sources: list | None = None,
+    collected_web_sources: list | None = None,
+) -> list[str]:
     from bidding_qa_chatbot.agent.agent import AgentDone, ToolCallNotice, ToolResultNotice
 
     if isinstance(item, LLMStreamEvent):
@@ -362,14 +421,27 @@ def _frames_for(item, conversation_id: str | None = None) -> list[str]:
                 ),
             )
         ]
-        # 参考来源随工具结果一并推给前端，参考来源面板据此填充
-        if item.sources:
+        # 参考来源随工具结果一并推给前端。**发累计列表**：多轮工具调用时，
+        # 前端按事件整体替换，若只发当前这批，后一次调用会把前一批（例如知识库
+        # 结果被联网结果）清空——持久化的一直是累计并集，展示也应当一致。
+        if collected_sources:
             frames.append(
                 encode_event(
                     "sources",
                     SourcesEvent(
-                        sources=[SourceRef.model_validate(s) for s in item.sources],
-                        retrieved=len(item.sources),
+                        sources=[SourceRef.model_validate(s) for s in collected_sources],
+                        retrieved=len(collected_sources),
+                        elapsed_ms=item.elapsed_ms,
+                    ),
+                )
+            )
+        if collected_web_sources:
+            frames.append(
+                encode_event(
+                    "web_sources",
+                    WebSourcesEvent(
+                        sources=[WebSource.model_validate(s) for s in collected_web_sources],
+                        retrieved=len(collected_web_sources),
                         elapsed_ms=item.elapsed_ms,
                     ),
                 )

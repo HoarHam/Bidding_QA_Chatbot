@@ -48,18 +48,17 @@ dependencies = [
     # 6.x 是当前维护线；锁 <7 避免大版本漂移（6.0 移除了 tx.run(timeout=) 这类旧写法，
     # 说明大版本会改 API）。本机实测 6.3.1。
     "neo4j>=6.3,<7",
+    # --- 联网搜索（第二阶段已实现）---
+    # Tavily：关键词搜索；用 AsyncTavilyClient 并注入共享 httpx 客户端（respx 可拦截）。
+    "tavily-python>=0.8.4,<0.9",
+    # MCP 客户端：npx 拉起 exa-mcp-server（语义搜索）。
+    # 锁 1.x：2.x 改用 httpx2，与 openai 3.x 同类风险（会让 respx 拦截失效）。
+    "mcp>=1.30,<2",
 ]
 
 [project.optional-dependencies]
 # ipykernel 仅本机分析语料时需要，不进生产依赖 (需求 14)
 notebook = ["ipykernel>=7.3,<8"]
-# 第二阶段才会安装；本阶段仅代码里有接口桩，不做真实连接
-phase2 = [
-    # sqlalchemy/psycopg 已提升为主依赖（Postgres 已实现），此处为历史遗留
-    "sqlalchemy>=2",
-    "psycopg[binary]>=3",
-    "tavily-python>=0.5",
-]
 
 [project.scripts]
 bidding-qa-chatbot = "bidding_qa_chatbot:main"

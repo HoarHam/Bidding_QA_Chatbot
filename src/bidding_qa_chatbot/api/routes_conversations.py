@@ -17,6 +17,7 @@ from bidding_qa_chatbot.schemas import (
     SearchHit,
     SearchResponse,
     SourceRef,
+    WebSource,
 )
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -36,13 +37,17 @@ def _summary(conv: Conversation) -> ConversationSummary:
 
 
 def _message_out(msg: Message) -> MessageOut:
-    # 存进去的是 SourceRef 的 dict 列表；老数据或异常数据容错处理，
-    # 单条来源损坏不该让整个会话打不开
+    # 存进去的是来源 dict 列表：本地来源是 SourceRef 原样，联网来源带 kind="web"。
+    # 老数据没有 kind → 按本地来源解析（向后兼容）；单条来源损坏不该让整个会话打不开。
     raw_sources = msg.sources or []
     sources: list[SourceRef] = []
+    web_sources: list[WebSource] = []
     for item in raw_sources:
         try:
-            sources.append(SourceRef.model_validate(item))
+            if isinstance(item, dict) and item.get("kind") == "web":
+                web_sources.append(WebSource.model_validate(item))
+            else:
+                sources.append(SourceRef.model_validate(item))
         except Exception:  # noqa: BLE001
             continue
     return MessageOut(
@@ -51,6 +56,7 @@ def _message_out(msg: Message) -> MessageOut:
         content=msg.content,
         reasoning=msg.reasoning,
         sources=sources,
+        web_sources=web_sources,
         provider=msg.provider,
         model=msg.model,
         created_at=msg.created_at,

@@ -60,6 +60,10 @@ _ENV_KEYS = (
     "NEO4J_CONNECTION_ACQUISITION_TIMEOUT",
     "NEO4J_MAX_ROWS",
     "ENABLE_NEO4J",
+    # 联网搜索：.env 里有真实 Tavily/Exa 密钥与开关，必须从测试环境里清掉
+    "TAVILY_API_KEY",
+    "EXA_API_KEY",
+    "ENABLE_WEB_SEARCH",
 )
 
 

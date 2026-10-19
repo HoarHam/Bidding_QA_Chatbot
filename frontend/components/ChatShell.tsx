@@ -11,7 +11,14 @@ import SourcesPanel from "./SourcesPanel";
 import type { ChatTurn, ToolActivity } from "./MessageBubble";
 import { getConversation, streamChat } from "@/lib/api";
 import { clearSession, fetchMe, getToken } from "@/lib/auth";
-import type { AttemptModel, Mode, MessageOut, SourceRef, UserOut } from "@/lib/types";
+import type {
+  AttemptModel,
+  Mode,
+  MessageOut,
+  SourceRef,
+  UserOut,
+  WebSource,
+} from "@/lib/types";
 
 let turnSeq = 0;
 const nextId = () => `turn-${++turnSeq}`;
@@ -39,7 +46,12 @@ function toTurn(m: MessageOut): ChatTurn {
  *    首轮对话的会话是在服务端建的（用户消息要先落库才能跑 Agent），
  *    前端拿回 id 后，后续提问才接得上同一个会话。
  */
-export default function ChatShell() {
+export default function ChatShell({
+  webSearchAvailable = false,
+}: {
+  /** 服务端是否具备联网搜索能力（由 page.tsx 从 /api/stats 注入）。 */
+  webSearchAvailable?: boolean;
+}) {
   const router = useRouter();
 
   const [user, setUser] = useState<UserOut | null>(null);
@@ -49,8 +61,10 @@ export default function ChatShell() {
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [sources, setSources] = useState<SourceRef[]>([]);
-  const [retrieved, setRetrieved] = useState(0);
+  const [webSources, setWebSources] = useState<WebSource[]>([]);
   const [mode, setMode] = useState<Mode>("fast");
+  // 联网搜索开关：跨发送保持，直到用户主动关闭
+  const [webSearch, setWebSearch] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sourcesPending, setSourcesPending] = useState(false);
   const [mobileSourcesOpen, setMobileSourcesOpen] = useState(false);
@@ -95,7 +109,7 @@ export default function ChatShell() {
     setConversationId(null);
     setTurns([]);
     setSources([]);
-    setRetrieved(0);
+    setWebSources([]);
   }, []);
 
   const handleSelectConversation = useCallback(
@@ -111,10 +125,11 @@ export default function ChatShell() {
         // 参考来源取最后一条助手消息的，与对话末尾展示的内容一致
         const lastAssistant = [...detail.messages].reverse().find((m) => m.role === "assistant");
         setSources(lastAssistant?.sources ?? []);
-        setRetrieved(lastAssistant?.sources?.length ?? 0);
+        setWebSources(lastAssistant?.web_sources ?? []);
       } catch {
         setTurns([]);
         setSources([]);
+        setWebSources([]);
       } finally {
         setLoadingHistory(false);
       }
@@ -129,7 +144,7 @@ export default function ChatShell() {
       const startedIn = conversationId;
 
       setSources([]);
-      setRetrieved(0);
+      setWebSources([]);
       setSourcesPending(true);
       setTurns((prev) => [
         ...prev,
@@ -150,6 +165,7 @@ export default function ChatShell() {
           {
             query,
             mode,
+            web_search: webSearch,
             conversation_id: startedIn,
             history: history
               .filter((t) => !t.error)
@@ -159,7 +175,10 @@ export default function ChatShell() {
           {
             onSources: (e) => {
               setSources(e.sources);
-              setRetrieved(e.retrieved);
+              setSourcesPending(false);
+            },
+            onWebSources: (e) => {
+              setWebSources(e.sources);
               setSourcesPending(false);
             },
             onProvider: (e) => {
@@ -244,7 +263,7 @@ export default function ChatShell() {
         );
       }
     },
-    [conversationId, mode, patchTurn],
+    [conversationId, mode, webSearch, patchTurn],
   );
 
   const handleSend = useCallback(
@@ -278,6 +297,7 @@ export default function ChatShell() {
   }
 
   const turnsWithRetry = turns.map((t) => (t.error ? { ...t, onRetry: handleRetry } : t));
+  const sourceCount = sources.length + webSources.length;
 
   return (
     <div className="flex min-h-0 flex-1 gap-4">
@@ -308,12 +328,15 @@ export default function ChatShell() {
             busy={busy}
             mode={mode}
             onModeChange={setMode}
+            webSearch={webSearch}
+            onWebSearchChange={setWebSearch}
+            webSearchAvailable={webSearchAvailable}
           />
         </div>
       </section>
 
       <div className="hidden w-80 shrink-0 lg:block">
-        <SourcesPanel sources={sources} retrieved={retrieved} pending={sourcesPending} />
+        <SourcesPanel sources={sources} webSources={webSources} pending={sourcesPending} />
       </div>
 
       <div className="lg:hidden">
@@ -323,7 +346,7 @@ export default function ChatShell() {
           className="fixed right-4 bottom-24 z-40 inline-flex cursor-pointer items-center gap-1 rounded-full bg-brand-600 px-3 py-2 text-xs text-white shadow-lg"
         >
           <BookOpen className="size-3.5" />
-          参考来源 {retrieved > 0 && `· ${retrieved}`}
+          参考来源 {sourceCount > 0 && `· ${sourceCount}`}
         </button>
 
         {mobileSourcesOpen && (
@@ -335,7 +358,7 @@ export default function ChatShell() {
             >
               关闭
             </button>
-            <SourcesPanel sources={sources} retrieved={retrieved} pending={sourcesPending} />
+            <SourcesPanel sources={sources} webSources={webSources} pending={sourcesPending} />
           </div>
         )}
       </div>
