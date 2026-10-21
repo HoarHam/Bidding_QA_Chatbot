@@ -43,6 +43,8 @@
 - **反馈**：`POST /api/messages/{message_id}/feedback`，body 为 `{"rating": "up" | "down" | null}`
   （`null` 清除），返回 `{"id": "...", "feedback": "up"}`。仅本人会话中的助手消息可操作。
 - `done` 事件现在带 `message_id`（落库失败时为 `null`），前端据此挂载反馈/重新生成。
+- `done.timings` 与历史 `MessageOut.timings` 返回同一份分阶段用时：
+  `{total_ms, thinking_ms, tool_ms, generation_ms}`（毫秒，均可为 0）。
 
 `mode` 取 `fast` 或 `thinking`。`web_search` 为用户端「联网搜索」开关：
 只有当服务端 `ENABLE_WEB_SEARCH=true` 且本请求为 `true` 时，模型才会看到联网工具；
@@ -98,7 +100,7 @@ event: error
 data: {"code":"stream_interrupted","message":"deepseek 连接中断","partial":true,"provider":"deepseek","attempts":[]}
 
 event: done
-data: {"finish_reason":"stop","provider":"deepseek","model":"deepseek-flash","usage":{"prompt_tokens":578,"completion_tokens":44,"total_tokens":622},"elapsed_ms":0,"request_id":"","conversation_id":"...","message_id":"<助手消息 id>"}
+data: {"finish_reason":"stop","provider":"deepseek","model":"deepseek-flash","usage":{"prompt_tokens":578,"completion_tokens":44,"total_tokens":622},"elapsed_ms":0,"request_id":"","conversation_id":"...","message_id":"<助手消息 id>","timings":{"total_ms":12345,"thinking_ms":4100,"tool_ms":2000,"generation_ms":6245}}
 ```
 
 ### 几个刻意的设计

@@ -170,6 +170,7 @@ async def add_message(
     reasoning: str | None = None,
     sources: list | None = None,
     attachments: list | None = None,
+    timings: dict | None = None,
     provider: str | None = None,
     model: str | None = None,
     title_from: bool = False,
@@ -193,6 +194,7 @@ async def add_message(
         # 归一化后再写入：调用方可能传的是 SourceRef 这类 pydantic 对象
         sources=_json_safe(sources),
         attachments=_json_safe(attachments),
+        timings=_json_safe(timings),
         provider=provider,
         model=model,
     )
@@ -293,8 +295,9 @@ async def update_assistant_message(
     content: str,
     reasoning: str | None,
     sources: list,
-    provider: str | None,
-    model: str | None,
+    timings: dict | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> bool:
     """重新生成：原地更新同一条助手消息（不改 seq/message_count，清空原反馈）。"""
     message = await get_message(session, user_id=user_id, message_id=message_id)
@@ -303,6 +306,7 @@ async def update_assistant_message(
     message.content = content
     message.reasoning = reasoning
     message.sources = _json_safe(sources)
+    message.timings = _json_safe(timings)
     message.provider = provider
     message.model = model
     message.feedback = None

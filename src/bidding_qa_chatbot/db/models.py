@@ -119,6 +119,8 @@ class Message(Base):
     #: 用户对助手消息的评价："up" / "down" / None（用于后续优化检索与生成策略）
     feedback: Mapped[str | None] = mapped_column(sa.String(8), default=None)
     feedback_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), default=None)
+    #: 分阶段用时（{total_ms, thinking_ms, tool_ms, generation_ms}），历史回载时展示。
+    timings: Mapped[dict | None] = mapped_column(JSONType, default=None)
     provider: Mapped[str | None] = mapped_column(sa.String(32), default=None)
     model: Mapped[str | None] = mapped_column(sa.String(128), default=None)
     created_at: Mapped[datetime] = mapped_column(

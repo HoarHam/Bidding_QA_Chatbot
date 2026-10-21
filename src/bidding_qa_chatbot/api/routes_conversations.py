@@ -15,6 +15,7 @@ from bidding_qa_chatbot.schemas import (
     ConversationListResponse,
     ConversationSummary,
     MessageOut,
+    MessageTimings,
     SearchHit,
     SearchResponse,
     SourceRef,
@@ -60,6 +61,14 @@ def _message_out(msg: Message) -> MessageOut:
         except Exception:  # noqa: BLE001 — 单条附件损坏不影响整个会话
             continue
 
+    raw_timings = getattr(msg, "timings", None)
+    timings: MessageTimings | None = None
+    if raw_timings:
+        try:
+            timings = MessageTimings.model_validate(raw_timings)
+        except Exception:  # noqa: BLE001 — 坏数据不影响整个会话
+            timings = None
+
     return MessageOut(
         id=str(msg.id),
         role=msg.role,  # type: ignore[arg-type]
@@ -69,6 +78,7 @@ def _message_out(msg: Message) -> MessageOut:
         web_sources=web_sources,
         attachments=attachments,
         feedback=getattr(msg, "feedback", None),
+        timings=timings,
         provider=msg.provider,
         model=msg.model,
         created_at=msg.created_at,

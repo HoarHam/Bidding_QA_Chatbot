@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 
@@ -47,6 +48,7 @@ from bidding_qa_chatbot.schemas import (
     DeltaEvent,
     DoneEvent,
     ErrorEvent,
+    MessageTimings,
     ProviderEvent,
     RetrieveResponse,
     SourceRef,
@@ -66,6 +68,30 @@ HEARTBEAT_SECONDS = 15.0
 
 def _to_usage(usage) -> Usage | None:
     return usage.to_model() if usage is not None else None
+
+
+def _build_timings(
+    started: float,
+    first_content_at: float | None,
+    tool_ms: int,
+    ended: float,
+) -> dict[str, int]:
+    """计算分阶段用时（毫秒）。
+
+    - 总用时：请求进入 `chat_stream` → 落库/结束
+    - 生成回答：首个正文 token → 结束
+    - 工具执行：所有 tool_result.elapsed_ms 之和
+    - 思考：总用时 − 工具执行 − 生成回答（含等待模型/排队/附件解析）
+    """
+    total_ms = max(0, int((ended - started) * 1000))
+    generation_ms = max(0, int((ended - first_content_at) * 1000)) if first_content_at else 0
+    thinking_ms = max(0, total_ms - tool_ms - generation_ms)
+    return {
+        "total_ms": total_ms,
+        "thinking_ms": thinking_ms,
+        "tool_ms": tool_ms,
+        "generation_ms": generation_ms,
+    }
 
 
 # ------------------------------------------------------------------ 检索
@@ -263,6 +289,7 @@ async def _persist_assistant(
     provider: str | None,
     model: str | None,
     message_id: str | None = None,
+    timings: dict | None = None,
 ) -> str | None:
     """落库助手回答，返回消息 id（失败返回 None）。
 
@@ -297,6 +324,7 @@ async def _persist_assistant(
                     content=content,
                     reasoning=reasoning,
                     sources=combined,
+                    timings=timings,
                     provider=provider,
                     model=model,
                 )
@@ -308,6 +336,7 @@ async def _persist_assistant(
                 content=content,
                 reasoning=reasoning,
                 sources=combined,
+                timings=timings,
                 provider=provider,
                 model=model,
             )
@@ -325,6 +354,8 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     settings: Settings = request.app.state.settings
     chain: ProviderChain = request.app.state.chain
     request_id = uuid.uuid4().hex
+    #: 总用时的起点（包含附件解析/排队；与前端测量口径一致）
+    request_started = time.perf_counter()
 
     # 重新生成：只允许最后一条助手消息；query 以数据库中的用户消息为准
     regenerate_id, regenerate_query = await _prepare_regenerate(request, user, body)
@@ -429,7 +460,9 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     collected_web_sources: list = []
     finished = {"provider": None, "model": None}
     #: 终止帧之前是否已经落库（避免 finally 重复插一条）
-    persisted = {"done": False, "message_id": None}
+    persisted = {"done": False, "message_id": None, "timings": None}
+    #: 分阶段用时状态：首个正文 token 的时刻 + 工具执行累计毫秒
+    timing_state = {"first_content_at": None, "tool_ms": 0}
 
     async def generate() -> AsyncIterator[str]:
         # 老路径下参考来源**先于**任何 token 发出，这样「展示参考来源」
@@ -445,6 +478,8 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     elapsed_ms=initial_elapsed,
                 ),
             )
+
+        from bidding_qa_chatbot.agent.agent import AgentDone, ToolResultNotice
 
         pending_kind, pending = first_kind, first_payload
         try:
@@ -464,13 +499,27 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     finished,
                 )
 
-                # 终止帧之前落库：done 事件要带 message_id，前端据此挂反馈/重新生成。
-                from bidding_qa_chatbot.agent.agent import AgentDone
+                # 记录分阶段用时：首个正文 token 的时刻 + 工具执行累计
+                if (
+                    timing_state["first_content_at"] is None
+                    and isinstance(pending, LLMStreamEvent)
+                    and pending.kind != "reasoning"
+                ):
+                    timing_state["first_content_at"] = time.perf_counter()
+                if isinstance(pending, ToolResultNotice):
+                    timing_state["tool_ms"] += max(0, pending.elapsed_ms)
 
+                # 终止帧之前落库：done 事件要带 message_id / timings。
                 terminal = isinstance(pending, AgentDone) or (
                     isinstance(pending, StreamEnd) and not use_agent
                 )
                 if terminal and not persisted["done"]:
+                    persisted["timings"] = _build_timings(
+                        request_started,
+                        timing_state["first_content_at"],
+                        timing_state["tool_ms"],
+                        time.perf_counter(),
+                    )
                     persisted["message_id"] = await _persist_assistant(
                         request,
                         user=user,
@@ -482,6 +531,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                         provider=finished["provider"],
                         model=finished["model"],
                         message_id=regenerate_id,
+                        timings=persisted["timings"],
                     )
                     # 落库成功才标记；失败留给 finally 再试一次
                     persisted["done"] = persisted["message_id"] is not None
@@ -492,6 +542,9 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     collected_sources,
                     collected_web_sources,
                     message_id=persisted["message_id"],
+                    timings=(
+                        MessageTimings(**persisted["timings"]) if persisted["timings"] else None
+                    ),
                 ):
                     yield frame
                 if isinstance(pending, MidStreamError | AllProvidersFailed):
@@ -525,6 +578,12 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
             # 历史里没有它反而会让回看时对不上。正常收尾已在 done 帧前落库。
             if not persisted["done"]:
                 with contextlib.suppress(Exception):
+                    timings = _build_timings(
+                        request_started,
+                        timing_state["first_content_at"],
+                        timing_state["tool_ms"],
+                        time.perf_counter(),
+                    )
                     await _persist_assistant(
                         request,
                         user=user,
@@ -536,6 +595,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                         provider=finished["provider"],
                         model=finished["model"],
                         message_id=regenerate_id,
+                        timings=timings,
                     )
 
     return StreamingResponse(
@@ -588,6 +648,7 @@ def _frames_for(
     collected_sources: list | None = None,
     collected_web_sources: list | None = None,
     message_id: str | None = None,
+    timings: MessageTimings | None = None,
 ) -> list[str]:
     from bidding_qa_chatbot.agent.agent import AgentDone, ToolCallNotice, ToolResultNotice
 
@@ -660,6 +721,7 @@ def _frames_for(
                     request_id="",
                     conversation_id=conversation_id,
                     message_id=message_id,
+                    timings=timings,
                 ),
             )
         ]
@@ -677,6 +739,7 @@ def _frames_for(
                     request_id="",
                     conversation_id=conversation_id,
                     message_id=message_id,
+                    timings=timings,
                 ),
             )
         ]

@@ -78,6 +78,17 @@ class Usage(BaseModel):
     total_tokens: int | None = None
 
 
+class MessageTimings(BaseModel):
+    """一轮回答的分阶段用时（毫秒）。"""
+
+    total_ms: int
+    #: 模型思考/等待 = total - tool - generation
+    thinking_ms: int
+    tool_ms: int
+    #: 首个正文 token → 结束
+    generation_ms: int
+
+
 class RetrieveResponse(BaseModel):
     sources: list[SourceRef]
     elapsed_ms: int
@@ -203,6 +214,8 @@ class DoneEvent(BaseModel):
     conversation_id: str | None = None
     #: 本轮助手消息的持久化 id（反馈/重新生成需要；落库失败时为 None）。
     message_id: str | None = None
+    #: 分阶段用时（落库失败时为 None）。
+    timings: MessageTimings | None = None
 
 
 # ---------------------------------------------------------------- 健康检查
@@ -274,6 +287,8 @@ class MessageOut(BaseModel):
     attachments: list[AttachmentOut] = Field(default_factory=list)
     #: 助手消息的用户反馈：up / down / None。
     feedback: Literal["up", "down"] | None = None
+    #: 分阶段用时（历史回载时展示）。
+    timings: MessageTimings | None = None
     provider: str | None = None
     model: str | None = None
     created_at: datetime

@@ -8,7 +8,7 @@ import Composer, { type PendingAttachment } from "./Composer";
 import ConversationSidebar from "./ConversationSidebar";
 import MessageList from "./MessageList";
 import SourcesPanel from "./SourcesPanel";
-import type { ChatTurn, ToolActivity } from "./MessageBubble";
+import type { ChatTurn, ToolActivity, TurnTimings } from "./MessageBubble";
 import {
   getConversation,
   setMessageFeedback,
@@ -19,8 +19,9 @@ import { clearSession, fetchMe, getToken } from "@/lib/auth";
 import type {
   AttemptModel,
   AttachmentOut,
-  Mode,
   MessageOut,
+  MessageTimings,
+  Mode,
   SourceRef,
   UserOut,
   WebSource,
@@ -28,6 +29,16 @@ import type {
 
 let turnSeq = 0;
 const nextId = () => `turn-${++turnSeq}`;
+
+function toTurnTimings(timings: MessageTimings | null | undefined): TurnTimings | undefined {
+  if (!timings) return undefined;
+  return {
+    totalMs: timings.total_ms,
+    thinkingMs: timings.thinking_ms,
+    toolMs: timings.tool_ms,
+    generationMs: timings.generation_ms,
+  };
+}
 
 function toTurn(m: MessageOut): ChatTurn {
   return {
@@ -38,6 +49,7 @@ function toTurn(m: MessageOut): ChatTurn {
     attachments: m.attachments ?? [],
     messageId: m.id,
     feedback: m.feedback,
+    timings: toTurnTimings(m.timings),
     provider: m.provider,
     model: m.model,
   };
@@ -210,6 +222,11 @@ export default function ChatShell({
       const attachmentIds = options.attachmentIds ?? [];
       const startedIn = conversationId;
 
+      // 分阶段用时（浏览器侧测量，包含网络与排队）
+      const startedAt = performance.now();
+      let firstTokenAt: number | null = null;
+      let toolElapsedMs = 0;
+
       const controller = new AbortController();
       abortRef.current = controller;
       setBusy(true);
@@ -260,6 +277,7 @@ export default function ChatShell({
               patchTurn(assistantId, { tools });
             },
             onToolResult: (e) => {
+              toolElapsedMs += Math.max(0, e.elapsed_ms);
               tools = tools.map((t, i) =>
                 i === tools.length - 1
                   ? { ...t, summary: e.summary, ok: e.ok, elapsedMs: e.elapsed_ms, pending: false }
@@ -268,6 +286,7 @@ export default function ChatShell({
               patchTurn(assistantId, { tools });
             },
             onToken: (e) => {
+              if (firstTokenAt === null) firstTokenAt = performance.now();
               content += e.delta;
               patchTurn(assistantId, { content, preparing: false });
             },
@@ -277,11 +296,26 @@ export default function ChatShell({
               });
             },
             onDone: (e) => {
+              const doneAt = performance.now();
+              const totalMs = Math.max(0, doneAt - startedAt);
+              const generationMs =
+                firstTokenAt === null ? 0 : Math.max(0, doneAt - firstTokenAt);
+              const thinkingMs = Math.max(
+                0,
+                totalMs - toolElapsedMs - generationMs,
+              );
               patchTurn(assistantId, {
                 streaming: false,
                 provider: e.provider,
                 model: e.model,
                 messageId: e.message_id ?? undefined,
+                // 优先使用后端落库的用时（与历史回载一致）；旧后端没有时退回本地测量
+                timings: toTurnTimings(e.timings) ?? {
+                  totalMs,
+                  thinkingMs,
+                  toolMs: toolElapsedMs,
+                  generationMs,
+                },
               });
               // 会话 id 由后端在建会话时生成，这里接住它，后续提问才能接上同一会话
               if (e.conversation_id && e.conversation_id !== startedIn) {
@@ -406,6 +440,7 @@ export default function ChatShell({
         tools: [],
         error: undefined,
         feedback: undefined,
+        timings: undefined,
         streaming: true,
         preparing: false,
       });

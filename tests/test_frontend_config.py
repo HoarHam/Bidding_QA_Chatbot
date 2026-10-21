@@ -193,3 +193,23 @@ def test_message_actions_and_feedback_api():
     assert "setMessageFeedback" in shell
     assert "regenerate_message_id" in shell
     assert "messageId: e.message_id" in shell
+
+
+def test_message_timings_are_computed_and_rendered():
+    bubble = (FRONTEND / "components" / "MessageBubble.tsx").read_text(encoding="utf-8")
+    assert 'data-testid="message-timings"' in bubble
+    assert "总用时" in bubble and "思考" in bubble
+    assert "工具执行" in bubble and "生成回答" in bubble
+
+    shell = (FRONTEND / "components" / "ChatShell.tsx").read_text(encoding="utf-8")
+    assert "performance.now()" in shell
+    assert "thinkingMs" in shell and "generationMs" in shell and "toolElapsedMs" in shell
+
+
+def test_timings_are_mirrored_from_wire_format():
+    types = (FRONTEND / "lib" / "types.ts").read_text(encoding="utf-8")
+    assert "export interface MessageTimings" in types
+    shell = (FRONTEND / "components" / "ChatShell.tsx").read_text(encoding="utf-8")
+    assert "toTurnTimings" in shell
+    assert "e.timings" in shell
+    assert "m.timings" in shell

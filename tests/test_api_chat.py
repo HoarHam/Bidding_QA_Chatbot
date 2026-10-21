@@ -967,3 +967,19 @@ async def test_regenerate_rejects_non_last_assistant_message(client_factory):
             },
         )
         assert resp.status_code == 400
+
+
+async def test_timings_are_persisted_and_returned_in_history(client_factory):
+    client = await client_factory(FakeChain())
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "投标保证金期限？"})
+        done = next(data for name, data in _sse_events(resp.text) if name == "done")
+        timings = done["timings"]
+        assert timings is not None
+        for key in ("total_ms", "thinking_ms", "tool_ms", "generation_ms"):
+            assert isinstance(timings[key], int) and timings[key] >= 0
+        assert timings["total_ms"] >= timings["generation_ms"]
+
+        detail = (await client.get(f"/api/conversations/{done['conversation_id']}")).json()
+        assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
+        assert assistant["timings"] == timings, "历史回载应返回同一份用时"

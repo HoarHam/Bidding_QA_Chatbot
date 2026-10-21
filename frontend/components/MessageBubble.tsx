@@ -30,6 +30,20 @@ export interface ToolActivity {
   pending?: boolean;
 }
 
+/** 一轮回答的分阶段用时（毫秒）。 */
+export interface TurnTimings {
+  totalMs: number;
+  /** 模型思考/等待：总时间 - 工具执行 - 生成回答 */
+  thinkingMs: number;
+  toolMs: number;
+  /** 首个正文 token → 结束 */
+  generationMs: number;
+}
+
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export interface ChatTurn {
   id: string;
   role: "user" | "assistant";
@@ -49,6 +63,8 @@ export interface ChatTurn {
   isLastAssistant?: boolean;
   onRegenerate?: () => void;
   onFeedback?: (rating: "up" | "down") => void;
+  /** 本轮各阶段用时。 */
+  timings?: TurnTimings;
   error?: { message: string; partial: boolean; attempts: AttemptModel[] };
   provider?: string | null;
   model?: string | null;
@@ -232,6 +248,24 @@ export default function MessageBubble({ turn }: { turn: ChatTurn }) {
             )}
 
             {copied && <span className="text-[10px] text-slate-400">已复制</span>}
+          </div>
+        )}
+
+        {!isUser && !turn.streaming && turn.timings && (
+          <div
+            data-testid="message-timings"
+            className="mt-1 flex flex-wrap items-center gap-2 pl-1 text-[10px] text-slate-400 tabular-nums"
+          >
+            <span>总用时 {formatSeconds(turn.timings.totalMs)}</span>
+            {turn.timings.thinkingMs > 0 && (
+              <span>思考 {formatSeconds(turn.timings.thinkingMs)}</span>
+            )}
+            {turn.timings.toolMs > 0 && (
+              <span>工具执行 {formatSeconds(turn.timings.toolMs)}</span>
+            )}
+            {turn.timings.generationMs > 0 && (
+              <span>生成回答 {formatSeconds(turn.timings.generationMs)}</span>
+            )}
           </div>
         )}
 

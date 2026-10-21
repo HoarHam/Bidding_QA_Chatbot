@@ -266,6 +266,17 @@ async function main() {
     (await page.getByTestId("regenerate").count()) === 1,
   );
 
+  // 分阶段用时：总用时 / 思考 / 工具执行 / 生成回答
+  const timingsCount = await page.getByTestId("message-timings").count();
+  const timingsText = timingsCount
+    ? await page.getByTestId("message-timings").last().innerText()
+    : "";
+  check(
+    "助手消息显示分阶段用时",
+    timingsCount >= 1 && /总用时/.test(timingsText) && /生成回答/.test(timingsText),
+    timingsText.replace(/\s+/g, " ").slice(0, 80),
+  );
+
   // 反馈接口用 mock，避免 UI 冒烟依赖真实后端
   await page.route("**/api/messages/*/feedback", async (route) => {
     const body = route.request().postDataJSON();
@@ -331,6 +342,10 @@ async function main() {
   // 带引用来源的回答必须连来源一起恢复——只恢复正文不算通过
   const restoredSources = await page.getByTestId("source-card").count();
   check("恢复的回答带回了引用来源", restoredSources > 0, `${restoredSources} 条来源`);
+
+  // 分阶段用时已持久化，历史回载后仍应显示
+  const restoredTimings = await page.getByTestId("message-timings").count();
+  check("恢复的回答带回了分阶段用时", restoredTimings > 0, `${restoredTimings} 条用时`);
 
   // ---------- 搜索历史对话 ----------
   await page.getByPlaceholder("搜索历史对话…").fill("保证金");

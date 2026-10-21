@@ -120,6 +120,22 @@ React 严格模式会双调用副作用，从 effect 里开流会导致同一条
 这些按钮都依赖持久化消息 id：历史消息来自 `MessageOut.id`，刚生成的消息来自
 `done` 事件的 `message_id`（落库失败时为 null，此时只显示复制）。重新生成后原反馈会被清空。
 
+## 分阶段用时
+
+助手消息完成后，气泡下方显示（`data-testid="message-timings"`）：
+
+```
+总用时 12.3s · 思考 4.1s · 工具执行 2.0s · 生成回答 6.2s
+```
+
+- 用时由**后端测量并落库**（`messages.timings`，迁移 `0007`），`done.timings` 与历史
+  `MessageOut.timings` 返回同一份数据：请求进入 → 结束为「总用时」；首个正文 token →
+  结束为「生成回答」；各 `tool_result.elapsed_ms` 之和为「工具执行」；「思考」=
+  总用时 − 工具执行 − 生成回答。
+- 思考模式下的推理 token 计入「思考」，不计入「生成回答」；为 0 的阶段不显示。
+- 刷新/跨会话恢复后仍然显示（来自历史消息）。旧后端没有 `timings` 时，前端退回本地
+  `performance.now()` 测量；流被用户停止或出错（没有 `done`）时不显示。
+
 ## 深度思考
 
 `reasoning` 事件渲染在**默认折叠**的面板里，且**按纯文本渲染**（`whitespace-pre-wrap`），

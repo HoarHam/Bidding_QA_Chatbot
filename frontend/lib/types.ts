@@ -83,6 +83,14 @@ export interface Usage {
   total_tokens: number | null;
 }
 
+/** 一轮回答的分阶段用时（毫秒）。 */
+export interface MessageTimings {
+  total_ms: number;
+  thinking_ms: number;
+  tool_ms: number;
+  generation_ms: number;
+}
+
 // ---------------------------------------------------------------- 响应
 export interface RetrieveResponse {
   sources: SourceRef[];
@@ -216,6 +224,8 @@ export interface DoneEvent {
   conversation_id: string | null;
   /** 本轮助手消息的持久化 id（反馈/重新生成需要）。 */
   message_id: string | null;
+  /** 分阶段用时（落库失败时为 null）。 */
+  timings: MessageTimings | null;
 }
 
 // ---------------------------------------------------------------- 账号
@@ -260,6 +270,8 @@ export interface MessageOut {
   attachments: AttachmentOut[];
   /** 助手消息的用户反馈：up / down / null。 */
   feedback: "up" | "down" | null;
+  /** 分阶段用时（历史回载时展示）。 */
+  timings: MessageTimings | null;
   provider: string | null;
   model: string | null;
   created_at: string;
