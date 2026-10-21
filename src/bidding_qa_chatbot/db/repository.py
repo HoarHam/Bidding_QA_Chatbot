@@ -236,6 +236,81 @@ async def list_messages(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def get_message(
+    session: AsyncSession, *, user_id: uuid.UUID, message_id: uuid.UUID
+) -> Message | None:
+    """按 id 取消息，**查询本身带 user_id**（越权读取防护）。"""
+    stmt = (
+        sa.select(Message)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(Message.id == message_id, Conversation.user_id == user_id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_message_by_seq(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    seq: int,
+) -> Message | None:
+    """按会话内序号取消息（重新生成时定位前一条用户消息）。"""
+    stmt = (
+        sa.select(Message)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.seq == seq,
+            Conversation.user_id == user_id,
+        )
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def set_message_feedback(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    message_id: uuid.UUID,
+    rating: str | None,
+) -> bool:
+    """写/清除助手消息的反馈。非本人或非助手消息返回 False。"""
+    message = await get_message(session, user_id=user_id, message_id=message_id)
+    if message is None or message.role != "assistant":
+        return False
+    message.feedback = rating
+    message.feedback_at = datetime.now(UTC) if rating else None
+    await session.flush()
+    return True
+
+
+async def update_assistant_message(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    message_id: uuid.UUID,
+    content: str,
+    reasoning: str | None,
+    sources: list,
+    provider: str | None,
+    model: str | None,
+) -> bool:
+    """重新生成：原地更新同一条助手消息（不改 seq/message_count，清空原反馈）。"""
+    message = await get_message(session, user_id=user_id, message_id=message_id)
+    if message is None or message.role != "assistant":
+        return False
+    message.content = content
+    message.reasoning = reasoning
+    message.sources = _json_safe(sources)
+    message.provider = provider
+    message.model = model
+    message.feedback = None
+    message.feedback_at = None
+    await session.flush()
+    return True
+
+
 async def recent_user_attachments(
     session: AsyncSession,
     *,

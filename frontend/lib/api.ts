@@ -7,6 +7,7 @@ import type {
   ChatRequest,
   ConversationDetail,
   ConversationListResponse,
+  FeedbackOut,
   RetrieveResponse,
   SearchResponse,
   SourceDetail,
@@ -139,6 +140,32 @@ export async function uploadAttachment(
     throw new Error(message);
   }
   return (await res.json()) as AttachmentOut;
+}
+
+/** 记录/清除助手消息的用户反馈（👍/👎）。 */
+export async function setMessageFeedback(
+  messageId: string,
+  rating: "up" | "down" | null,
+): Promise<FeedbackOut> {
+  const res = await fetch(
+    `${baseUrl()}/api/messages/${encodeURIComponent(messageId)}/feedback`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ rating }),
+    },
+  );
+  if (!res.ok) {
+    let message = `反馈失败（HTTP ${res.status}）`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      message = body.detail ?? message;
+    } catch {
+      // 非 JSON 错误体：保留默认文案
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as FeedbackOut;
 }
 
 /** 发起流式问答。返回的 Promise 在流消费完毕后 resolve。 */

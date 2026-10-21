@@ -292,6 +292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from bidding_qa_chatbot.api.routes_chat import router as chat_router
     from bidding_qa_chatbot.api.routes_conversations import router as conversations_router
     from bidding_qa_chatbot.api.routes_health import router as health_router
+    from bidding_qa_chatbot.api.routes_messages import router as messages_router
     from bidding_qa_chatbot.api.routes_sources import router as sources_router
 
     app.include_router(health_router)
@@ -299,6 +300,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(conversations_router)
     app.include_router(sources_router)
     app.include_router(attachments_router)
+    app.include_router(messages_router)
     app.include_router(chat_router)
     return app
 

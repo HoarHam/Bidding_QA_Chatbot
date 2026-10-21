@@ -32,6 +32,8 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list, max_length=12)
     #: 续接已有会话时传入；为空则新建一个会话。
     conversation_id: str | None = None
+    #: 重新生成：要原地替换的助手消息 id（只允许该会话最后一条助手消息）。
+    regenerate_message_id: str | None = None
 
 
 # ---------------------------------------------------------------- 引用来源
@@ -199,6 +201,8 @@ class DoneEvent(BaseModel):
     request_id: str
     #: 本次问答所属会话。前端据此把后续提问接到同一会话上（跨会话恢复的关键）。
     conversation_id: str | None = None
+    #: 本轮助手消息的持久化 id（反馈/重新生成需要；落库失败时为 None）。
+    message_id: str | None = None
 
 
 # ---------------------------------------------------------------- 健康检查
@@ -268,9 +272,21 @@ class MessageOut(BaseModel):
     web_sources: list[WebSource] = Field(default_factory=list)
     #: 用户消息携带的附件元数据（OCR 文本只在服务端）。
     attachments: list[AttachmentOut] = Field(default_factory=list)
+    #: 助手消息的用户反馈：up / down / None。
+    feedback: Literal["up", "down"] | None = None
     provider: str | None = None
     model: str | None = None
     created_at: datetime
+
+
+class FeedbackRequest(BaseModel):
+    #: None 表示清除已有反馈。
+    rating: Literal["up", "down"] | None
+
+
+class FeedbackOut(BaseModel):
+    id: str
+    feedback: Literal["up", "down"] | None = None
 
 
 class ConversationSummary(BaseModel):

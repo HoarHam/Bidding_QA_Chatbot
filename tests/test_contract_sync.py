@@ -49,6 +49,8 @@ def test_frontend_types_mirror_backend_schemas():
         ("SourceDetail", schemas.SourceDetail),
         ("WebSource", schemas.WebSource),
         ("AttachmentOut", schemas.AttachmentOut),
+        ("FeedbackRequest", schemas.FeedbackRequest),
+        ("FeedbackOut", schemas.FeedbackOut),
         ("SourcesEvent", schemas.SourcesEvent),
         ("WebSourcesEvent", schemas.WebSourcesEvent),
         ("StatsResponse", schemas.StatsResponse),

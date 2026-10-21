@@ -152,6 +152,48 @@ def _attachment_error_response(request_id: str, exc: AttachmentError) -> JSONRes
     return response
 
 
+async def _prepare_regenerate(
+    request: Request, user, body: ChatRequest
+) -> tuple[str | None, str | None]:
+    """校验「重新生成」目标，返回 `(助手消息 id, 前一条用户消息内容)`。
+
+    - 只允许本人会话里的助手消息；
+    - 只允许该会话**最后一条**助手消息；
+    - query 以数据库里的用户消息为准（前端传的 query 不参与）。
+    """
+    if not body.regenerate_message_id:
+        return None, None
+    try:
+        message_uuid = uuid.UUID(body.regenerate_message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="消息 id 格式非法") from exc
+
+    db = request.app.state.db
+    async with db.session() as session:
+        message = await repo.get_message(session, user_id=user.id, message_id=message_uuid)
+        if message is None or message.role != "assistant":
+            raise HTTPException(status_code=404, detail="消息不存在")
+        conversation = await repo.get_conversation(
+            session, user_id=user.id, conversation_id=message.conversation_id
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        if body.conversation_id and body.conversation_id != str(message.conversation_id):
+            raise HTTPException(status_code=400, detail="消息不属于该会话")
+        if message.seq != conversation.message_count:
+            raise HTTPException(status_code=400, detail="只能重新生成最后一条助手消息")
+        previous = await repo.get_message_by_seq(
+            session,
+            user_id=user.id,
+            conversation_id=message.conversation_id,
+            seq=message.seq - 1,
+        )
+        if previous is None or previous.role != "user":
+            raise HTTPException(status_code=400, detail="找不到对应的用户消息")
+        body.conversation_id = str(message.conversation_id)
+        return str(message.id), previous.content
+
+
 @router.post("/retrieve", response_model=RetrieveResponse)
 async def retrieve_only(body: ChatRequest, request: Request, user: CurrentUser) -> RetrieveResponse:
     """只检索不生成。便于单独排查检索质量，不消耗 LLM 配额。"""
@@ -167,8 +209,11 @@ async def _resolve_conversation(
     body: ChatRequest,
     *,
     attachments: list[dict] | None = None,
+    persist_user_message: bool = True,
 ):
     """解析或新建会话，并**立即提交**用户消息（含附件元数据与 OCR 文本）。
+
+    `persist_user_message=False` 用于「重新生成」：复用已有会话，不新增用户消息。
 
     刻意不复用请求作用域的 `DbSession`：它的提交发生在响应**完全发送之后**
     （StreamingResponse 的依赖清理在流结束才执行）。那样会有两个后果：
@@ -194,14 +239,15 @@ async def _resolve_conversation(
         if conversation is None:
             conversation = await repo.create_conversation(session, user_id=user.id)
 
-        await repo.add_message(
-            session,
-            conversation=conversation,
-            role="user",
-            content=body.query,
-            attachments=attachments,
-            title_from=True,  # 首条用户消息顺带定标题
-        )
+        if persist_user_message:
+            await repo.add_message(
+                session,
+                conversation=conversation,
+                role="user",
+                content=body.query,
+                attachments=attachments,
+                title_from=True,  # 首条用户消息顺带定标题
+            )
         return str(conversation.id)
 
 
@@ -216,15 +262,15 @@ async def _persist_assistant(
     web_sources: list,
     provider: str | None,
     model: str | None,
-) -> None:
-    """落库助手回答。**失败只记日志，不影响已经发给用户的回答。**
+    message_id: str | None = None,
+) -> str | None:
+    """落库助手回答，返回消息 id（失败返回 None）。
 
-    本地来源与联网来源同存于 `messages.sources`（JSON）：联网项带
-    `"kind": "web"` 标记，读取时在 `routes_conversations._message_out` 分流。
-    旧数据没有标记 → 按本地来源解析，向后兼容，不需要数据库迁移。
+    `message_id` 为空 → 新建；非空 → **原地更新**（重新生成，清空原反馈）。
+    失败只记日志，不影响已经发给用户的回答。
     """
     if not content:
-        return
+        return None
     try:
         combined = [
             *sources,
@@ -242,8 +288,20 @@ async def _persist_assistant(
                 session, user_id=user.id, conversation_id=uuid.UUID(conversation_id)
             )
             if conversation is None:
-                return
-            await repo.add_message(
+                return None
+            if message_id is not None:
+                ok = await repo.update_assistant_message(
+                    session,
+                    user_id=user.id,
+                    message_id=uuid.UUID(message_id),
+                    content=content,
+                    reasoning=reasoning,
+                    sources=combined,
+                    provider=provider,
+                    model=model,
+                )
+                return message_id if ok else None
+            message = await repo.add_message(
                 session,
                 conversation=conversation,
                 role="assistant",
@@ -253,8 +311,10 @@ async def _persist_assistant(
                 provider=provider,
                 model=model,
             )
+            return str(message.id)
     except Exception:  # noqa: BLE001
         logger.exception("助手回答落库失败（回答已正常返回给用户）")
+        return None
 
 
 # ------------------------------------------------------------------ SSE
@@ -266,6 +326,12 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     chain: ProviderChain = request.app.state.chain
     request_id = uuid.uuid4().hex
 
+    # 重新生成：只允许最后一条助手消息；query 以数据库中的用户消息为准
+    regenerate_id, regenerate_query = await _prepare_regenerate(request, user, body)
+    if regenerate_query is not None:
+        body.query = regenerate_query
+        body.attachment_ids = []  # 重新生成不接收新附件（历史附件按追问上下文注入）
+
     # 附件必须在会话/用户消息落库**之前**解析：OCR 失败时不产生任何副作用。
     try:
         attachment_ctx = await _load_attachment_context(request, user, body)
@@ -274,7 +340,11 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
 
     # 会话与用户消息在**开流之前**落地（独立事务，见 _resolve_conversation 的说明）
     conversation_id = await _resolve_conversation(
-        request, user, body, attachments=attachment_ctx.persisted or None
+        request,
+        user,
+        body,
+        attachments=attachment_ctx.persisted or None,
+        persist_user_message=regenerate_id is None,
     )
 
     agent = getattr(request.app.state, "agent", None)
@@ -358,6 +428,8 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     collected_sources: list = []
     collected_web_sources: list = []
     finished = {"provider": None, "model": None}
+    #: 终止帧之前是否已经落库（避免 finally 重复插一条）
+    persisted = {"done": False, "message_id": None}
 
     async def generate() -> AsyncIterator[str]:
         # 老路径下参考来源**先于**任何 token 发出，这样「展示参考来源」
@@ -391,8 +463,35 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     collected_web_sources,
                     finished,
                 )
+
+                # 终止帧之前落库：done 事件要带 message_id，前端据此挂反馈/重新生成。
+                from bidding_qa_chatbot.agent.agent import AgentDone
+
+                terminal = isinstance(pending, AgentDone) or (
+                    isinstance(pending, StreamEnd) and not use_agent
+                )
+                if terminal and not persisted["done"]:
+                    persisted["message_id"] = await _persist_assistant(
+                        request,
+                        user=user,
+                        conversation_id=conversation_id,
+                        content="".join(answer_parts),
+                        reasoning="".join(reasoning_parts) or None,
+                        sources=collected_sources,
+                        web_sources=collected_web_sources,
+                        provider=finished["provider"],
+                        model=finished["model"],
+                        message_id=regenerate_id,
+                    )
+                    # 落库成功才标记；失败留给 finally 再试一次
+                    persisted["done"] = persisted["message_id"] is not None
+
                 for frame in _frames_for(
-                    pending, conversation_id, collected_sources, collected_web_sources
+                    pending,
+                    conversation_id,
+                    collected_sources,
+                    collected_web_sources,
+                    message_id=persisted["message_id"],
                 ):
                     yield frame
                 if isinstance(pending, MidStreamError | AllProvidersFailed):
@@ -401,8 +500,6 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                 # 两者都代表「本轮结束」，但不能都用 StreamEnd 判断——
                 # Agent 中间轮次也会产出 StreamEnd（那一轮要求调用工具），
                 # 若按它收尾就会在第一轮工具调用后直接结束、拿不到答案。
-                from bidding_qa_chatbot.agent.agent import AgentDone
-
                 if isinstance(pending, AgentDone):
                     break
                 if isinstance(pending, StreamEnd) and not use_agent:
@@ -425,19 +522,21 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
             with contextlib.suppress(Exception):
                 await asyncio.gather(task, return_exceptions=True)
             # 即便中途失败也把已产出的部分存下来——用户已经看到了这段内容，
-            # 历史里没有它反而会让回看时对不上。
-            with contextlib.suppress(Exception):
-                await _persist_assistant(
-                    request,
-                    user=user,
-                    conversation_id=conversation_id,
-                    content="".join(answer_parts),
-                    reasoning="".join(reasoning_parts) or None,
-                    sources=collected_sources,
-                    web_sources=collected_web_sources,
-                    provider=finished["provider"],
-                    model=finished["model"],
-                )
+            # 历史里没有它反而会让回看时对不上。正常收尾已在 done 帧前落库。
+            if not persisted["done"]:
+                with contextlib.suppress(Exception):
+                    await _persist_assistant(
+                        request,
+                        user=user,
+                        conversation_id=conversation_id,
+                        content="".join(answer_parts),
+                        reasoning="".join(reasoning_parts) or None,
+                        sources=collected_sources,
+                        web_sources=collected_web_sources,
+                        provider=finished["provider"],
+                        model=finished["model"],
+                        message_id=regenerate_id,
+                    )
 
     return StreamingResponse(
         generate(),
@@ -488,6 +587,7 @@ def _frames_for(
     conversation_id: str | None = None,
     collected_sources: list | None = None,
     collected_web_sources: list | None = None,
+    message_id: str | None = None,
 ) -> list[str]:
     from bidding_qa_chatbot.agent.agent import AgentDone, ToolCallNotice, ToolResultNotice
 
@@ -559,6 +659,7 @@ def _frames_for(
                     elapsed_ms=0,
                     request_id="",
                     conversation_id=conversation_id,
+                    message_id=message_id,
                 ),
             )
         ]
@@ -575,6 +676,7 @@ def _frames_for(
                     elapsed_ms=0,
                     request_id="",
                     conversation_id=conversation_id,
+                    message_id=message_id,
                 ),
             )
         ]

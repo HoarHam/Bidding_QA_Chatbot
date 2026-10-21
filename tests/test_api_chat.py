@@ -861,3 +861,109 @@ def test_message_out_exposes_attachment_metadata_only():
 
     assert [a.filename for a in out.attachments] == ["a.png"]
     assert not hasattr(out.attachments[0], "ocr_text")
+
+
+# ---------------------------------------------------------------- 消息操作与反馈
+async def test_done_event_includes_message_id_and_feedback_roundtrip(client_factory):
+    client = await client_factory(FakeChain())
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "投标保证金退还期限？"})
+        done = next(data for name, data in _sse_events(resp.text) if name == "done")
+        message_id = done["message_id"]
+        conversation_id = done["conversation_id"]
+        assert message_id
+
+        up = await client.post(f"/api/messages/{message_id}/feedback", json={"rating": "up"})
+        assert up.status_code == 200
+        assert up.json() == {"id": message_id, "feedback": "up"}
+
+        detail = (await client.get(f"/api/conversations/{conversation_id}")).json()
+        assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
+        assert assistant["feedback"] == "up"
+
+        down = await client.post(f"/api/messages/{message_id}/feedback", json={"rating": "down"})
+        assert down.json()["feedback"] == "down"
+
+        cleared = await client.post(f"/api/messages/{message_id}/feedback", json={"rating": None})
+        assert cleared.status_code == 200
+        assert cleared.json()["feedback"] is None
+
+
+async def test_feedback_rejects_unknown_and_non_assistant(client_factory):
+    client = await client_factory(FakeChain())
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "测试问题"})
+        done = next(data for name, data in _sse_events(resp.text) if name == "done")
+        detail = (await client.get(f"/api/conversations/{done['conversation_id']}")).json()
+        user_message = next(m for m in detail["messages"] if m["role"] == "user")
+
+        non_assistant = await client.post(
+            f"/api/messages/{user_message['id']}/feedback", json={"rating": "up"}
+        )
+        assert non_assistant.status_code == 404
+
+        unknown = await client.post(f"/api/messages/{uuid.uuid4()}/feedback", json={"rating": "up"})
+        assert unknown.status_code == 404
+
+        invalid = await client.post("/api/messages/not-a-uuid/feedback", json={"rating": "up"})
+        assert invalid.status_code == 400
+
+
+async def test_regenerate_updates_same_message_without_duplicates(client_factory):
+    chain = FakeChain()
+    client = await client_factory(chain)
+    async with client:
+        first = await client.post("/api/chat/stream", json={"query": "投标保证金期限？"})
+        done = next(data for name, data in _sse_events(first.text) if name == "done")
+        message_id = done["message_id"]
+        conversation_id = done["conversation_id"]
+        await client.post(f"/api/messages/{message_id}/feedback", json={"rating": "up"})
+
+        before = (await client.get(f"/api/conversations/{conversation_id}")).json()["messages"]
+        assert len(before) == 2
+
+        chain.script = [("text", "重新生成后的回答")]
+        second = await client.post(
+            "/api/chat/stream",
+            json={
+                "query": "投标保证金期限？",
+                "conversation_id": conversation_id,
+                "regenerate_message_id": message_id,
+            },
+        )
+        assert second.status_code == 200
+        done2 = next(data for name, data in _sse_events(second.text) if name == "done")
+        assert done2["message_id"] == message_id
+
+        after = (await client.get(f"/api/conversations/{conversation_id}")).json()["messages"]
+        assert len(after) == 2, "重新生成不应新增用户/助手消息"
+        assistant = next(m for m in after if m["role"] == "assistant")
+        assert assistant["id"] == message_id
+        assert "重新生成后的回答" in assistant["content"]
+        assert assistant["feedback"] is None, "重新生成后原反馈应清空"
+
+
+async def test_regenerate_rejects_non_last_assistant_message(client_factory):
+    chain = FakeChain()
+    client = await client_factory(chain)
+    async with client:
+        first = await client.post("/api/chat/stream", json={"query": "第一问"})
+        done = next(data for name, data in _sse_events(first.text) if name == "done")
+        conversation_id = done["conversation_id"]
+        old_message_id = done["message_id"]
+
+        chain.script = [("text", "第二轮回答")]
+        await client.post(
+            "/api/chat/stream",
+            json={"query": "第二问", "conversation_id": conversation_id},
+        )
+
+        resp = await client.post(
+            "/api/chat/stream",
+            json={
+                "query": "第一问",
+                "conversation_id": conversation_id,
+                "regenerate_message_id": old_message_id,
+            },
+        )
+        assert resp.status_code == 400

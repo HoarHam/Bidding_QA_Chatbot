@@ -165,8 +165,8 @@ def test_upload_helper_uses_multipart_without_manual_content_type():
     assert 'form.append("file"' in api
 
     start = api.index("export async function uploadAttachment")
-    end = api.index("/** 发起流式问答", start)
-    block = api[start:end]
+    next_export = api.find("\nexport async function", start + 1)
+    block = api[start : next_export if next_export != -1 else len(api)]
     assert "content-type" not in block.lower(), (
         "手动设置 multipart 的 content-type 会丢掉 boundary，FastAPI 无法解析"
     )
@@ -176,3 +176,20 @@ def test_chat_shell_sends_attachment_ids():
     shell = (FRONTEND / "components" / "ChatShell.tsx").read_text(encoding="utf-8")
     assert "attachment_ids: attachmentIds" in shell
     assert "uploadAttachment" in shell
+
+
+def test_message_actions_and_feedback_api():
+    bubble = (FRONTEND / "components" / "MessageBubble.tsx").read_text(encoding="utf-8")
+    assert 'data-testid="message-actions"' in bubble
+    assert 'data-testid="feedback-up"' in bubble
+    assert 'data-testid="feedback-down"' in bubble
+    assert 'data-testid="regenerate"' in bubble
+    assert "isLastAssistant" in bubble, "只有最后一条助手消息可以重新生成"
+
+    api = (FRONTEND / "lib" / "api.ts").read_text(encoding="utf-8")
+    assert "/api/messages/${encodeURIComponent(messageId)}/feedback" in api
+
+    shell = (FRONTEND / "components" / "ChatShell.tsx").read_text(encoding="utf-8")
+    assert "setMessageFeedback" in shell
+    assert "regenerate_message_id" in shell
+    assert "messageId: e.message_id" in shell

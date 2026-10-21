@@ -96,6 +96,8 @@ erDiagram
         text reasoning
         json sources
         json attachments
+        string feedback
+        datetime feedback_at
         string provider
         string model
     }
@@ -113,6 +115,9 @@ erDiagram
   做一次子查询。由 `add_message` 一并维护，其值同时就是下一条消息的 `seq`。
 - **`sources` 存成 JSON 而不是关联表。** 引用来源只随消息整体读写，
   从不单独查询，单独建表只增加连接开销。
+- **`feedback` / `feedback_at`**（迁移 `0006`）：用户对助手消息的 👍/👎，
+  仅 `"up"` / `"down"` / NULL；`null` 表示未评价/已清除。只允许写本人会话中的助手消息，
+  用于后续分析检索与生成策略。
 - **`attachments` 同样存成 JSON**（迁移 `0005`）。内容是
   `[{id, filename, content_type, size, kind, ocr_text}]`：对外接口只下发元数据，
   `ocr_text` 仅服务端用于同会话追问。该列使用 `none_as_null=True`，

@@ -367,3 +367,51 @@ async def test_recent_user_attachments_is_scoped_and_newest_first(db):
             )
             == []
         )
+
+
+async def test_message_feedback_is_user_scoped_and_regenerate_clears_it(db):
+    user1 = await _make_user(db, "fb_a")
+    user2 = await _make_user(db, "fb_b")
+    async with db.session() as session:
+        conv = await repo.create_conversation(session, user_id=user1.id)
+        await repo.add_message(session, conversation=conv, role="user", content="q")
+        assistant = await repo.add_message(
+            session, conversation=conv, role="assistant", content="a"
+        )
+        msg_id = assistant.id
+
+    async with db.session() as session:
+        # 非本人不能写反馈
+        assert (
+            await repo.set_message_feedback(
+                session, user_id=user2.id, message_id=msg_id, rating="up"
+            )
+            is False
+        )
+        assert (
+            await repo.set_message_feedback(
+                session, user_id=user1.id, message_id=msg_id, rating="up"
+            )
+            is True
+        )
+    async with db.session() as session:
+        message = await repo.get_message(session, user_id=user1.id, message_id=msg_id)
+        assert message is not None and message.feedback == "up"
+
+    async with db.session() as session:
+        assert await repo.update_assistant_message(
+            session,
+            user_id=user1.id,
+            message_id=msg_id,
+            content="新回答",
+            reasoning=None,
+            sources=[],
+            provider="p",
+            model="m",
+        )
+    async with db.session() as session:
+        message = await repo.get_message(session, user_id=user1.id, message_id=msg_id)
+        assert message is not None
+        assert message.content == "新回答"
+        assert message.feedback is None and message.feedback_at is None
+        assert message.seq == 2  # 原地更新，不改序号

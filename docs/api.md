@@ -10,6 +10,7 @@
 | POST | `/api/chat/stream` | **SSE 流式问答**（主入口） |
 | POST | `/api/chat` | 一次性 JSON 回答 |
 | POST | `/api/attachments` | 上传附件（multipart；只存储，发送时才 OCR） |
+| POST | `/api/messages/{message_id}/feedback` | 记录/清除助手消息反馈（`up`/`down`/`null`） |
 | POST | `/api/retrieve` | **只检索不生成**，便于单独排查检索质量、不消耗 LLM 额度 |
 | GET | `/api/sources/{chunk_id}` | 分块完整记录 |
 | GET | `/api/sources/{chunk_id}/images/{index}` | 分块内嵌图片（PNG） |
@@ -33,6 +34,15 @@
    GLM-OCR 解析；解析失败返回 JSON 错误（400/404/413/415/422/503），**不创建会话、不落用户消息**。
 3. 历史消息的 `MessageOut.attachments` 只返回元数据，OCR 文本仅服务端保存（用于同会话追问）。
    同一会话后续不带附件的提问会自动带上最近一次附件的 OCR 文本。
+
+### 重新生成与反馈
+
+- **重新生成**：请求带 `conversation_id` + `regenerate_message_id`（仅允许该会话最后一条
+  助手消息）。后端原地更新同一条消息，不新增用户/助手消息，并清空原反馈；`done` 事件返回
+  同一个 `message_id`。`query` 以数据库中前一条用户消息为准。
+- **反馈**：`POST /api/messages/{message_id}/feedback`，body 为 `{"rating": "up" | "down" | null}`
+  （`null` 清除），返回 `{"id": "...", "feedback": "up"}`。仅本人会话中的助手消息可操作。
+- `done` 事件现在带 `message_id`（落库失败时为 `null`），前端据此挂载反馈/重新生成。
 
 `mode` 取 `fast` 或 `thinking`。`web_search` 为用户端「联网搜索」开关：
 只有当服务端 `ENABLE_WEB_SEARCH=true` 且本请求为 `true` 时，模型才会看到联网工具；
@@ -88,7 +98,7 @@ event: error
 data: {"code":"stream_interrupted","message":"deepseek 连接中断","partial":true,"provider":"deepseek","attempts":[]}
 
 event: done
-data: {"finish_reason":"stop","provider":"deepseek","model":"deepseek-flash","usage":{"prompt_tokens":578,"completion_tokens":44,"total_tokens":622},"elapsed_ms":0,"request_id":""}
+data: {"finish_reason":"stop","provider":"deepseek","model":"deepseek-flash","usage":{"prompt_tokens":578,"completion_tokens":44,"total_tokens":622},"elapsed_ms":0,"request_id":"","conversation_id":"...","message_id":"<助手消息 id>"}
 ```
 
 ### 几个刻意的设计

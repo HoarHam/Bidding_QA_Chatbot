@@ -9,7 +9,12 @@ import ConversationSidebar from "./ConversationSidebar";
 import MessageList from "./MessageList";
 import SourcesPanel from "./SourcesPanel";
 import type { ChatTurn, ToolActivity } from "./MessageBubble";
-import { getConversation, streamChat, uploadAttachment } from "@/lib/api";
+import {
+  getConversation,
+  setMessageFeedback,
+  streamChat,
+  uploadAttachment,
+} from "@/lib/api";
 import { clearSession, fetchMe, getToken } from "@/lib/auth";
 import type {
   AttemptModel,
@@ -31,6 +36,8 @@ function toTurn(m: MessageOut): ChatTurn {
     content: m.content,
     reasoning: m.reasoning ?? undefined,
     attachments: m.attachments ?? [],
+    messageId: m.id,
+    feedback: m.feedback,
     provider: m.provider,
     model: m.model,
   };
@@ -193,33 +200,15 @@ export default function ChatShell({
     [conversationId, clearAttachment],
   );
 
-  const send = useCallback(
+  const streamInto = useCallback(
     async (
+      assistantId: string,
       query: string,
       history: ChatTurn[],
-      attachmentIds: string[] = [],
-      attachmentMeta: AttachmentOut[] = [],
+      options: { attachmentIds?: string[]; regenerateMessageId?: string } = {},
     ) => {
-      lastQueryRef.current = query;
-      lastAttachmentIdsRef.current = attachmentIds;
-      lastAttachmentMetaRef.current = attachmentMeta;
-      const assistantId = nextId();
+      const attachmentIds = options.attachmentIds ?? [];
       const startedIn = conversationId;
-
-      setSources([]);
-      setWebSources([]);
-      setSourcesPending(true);
-      setTurns((prev) => [
-        ...prev,
-        { id: nextId(), role: "user", content: query, attachments: attachmentMeta },
-        {
-          id: assistantId,
-          role: "assistant",
-          content: "",
-          streaming: true,
-          preparing: attachmentIds.length > 0,
-        },
-      ]);
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -237,6 +226,7 @@ export default function ChatShell({
             web_search: webSearch,
             attachment_ids: attachmentIds,
             conversation_id: startedIn,
+            regenerate_message_id: options.regenerateMessageId,
             history: history
               .filter((t) => !t.error)
               .map((t) => ({ role: t.role, content: t.content }))
@@ -291,6 +281,7 @@ export default function ChatShell({
                 streaming: false,
                 provider: e.provider,
                 model: e.model,
+                messageId: e.message_id ?? undefined,
               });
               // 会话 id 由后端在建会话时生成，这里接住它，后续提问才能接上同一会话
               if (e.conversation_id && e.conversation_id !== startedIn) {
@@ -339,6 +330,38 @@ export default function ChatShell({
     [conversationId, mode, webSearch, patchTurn],
   );
 
+  const send = useCallback(
+    async (
+      query: string,
+      history: ChatTurn[],
+      attachmentIds: string[] = [],
+      attachmentMeta: AttachmentOut[] = [],
+    ) => {
+      lastQueryRef.current = query;
+      lastAttachmentIdsRef.current = attachmentIds;
+      lastAttachmentMetaRef.current = attachmentMeta;
+      const assistantId = nextId();
+
+      setSources([]);
+      setWebSources([]);
+      setSourcesPending(true);
+      setTurns((prev) => [
+        ...prev,
+        { id: nextId(), role: "user", content: query, attachments: attachmentMeta },
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          streaming: true,
+          preparing: attachmentIds.length > 0,
+        },
+      ]);
+
+      await streamInto(assistantId, query, history, { attachmentIds });
+    },
+    [streamInto],
+  );
+
   const handleSend = useCallback(
     (text: string, attachmentIds: string[]) => {
       const history = turns.filter((t) => t.role === "user" || t.content);
@@ -358,6 +381,53 @@ export default function ChatShell({
       if (attachmentIds.length > 0) setAttachment(null);
     },
     [send, turns, attachment],
+  );
+
+  /** 重新生成：只允许最后一条助手消息，原地替换（后端更新同一条消息）。 */
+  const handleRegenerate = useCallback(
+    (turn: ChatTurn) => {
+      if (busy || turn.role !== "assistant" || !turn.messageId) return;
+      const index = turns.findIndex((t) => t.id === turn.id);
+      if (index < 0) return;
+      const precedingUser = [...turns.slice(0, index)]
+        .reverse()
+        .find((t) => t.role === "user" && t.content.trim());
+      if (!precedingUser) return;
+
+      const history = turns
+        .slice(0, index)
+        .filter((t) => t.role === "user" || t.content);
+      setSources([]);
+      setWebSources([]);
+      setSourcesPending(true);
+      patchTurn(turn.id, {
+        content: "",
+        reasoning: undefined,
+        tools: [],
+        error: undefined,
+        feedback: undefined,
+        streaming: true,
+        preparing: false,
+      });
+      void streamInto(turn.id, precedingUser.content, history, {
+        regenerateMessageId: turn.messageId,
+      });
+    },
+    [busy, turns, patchTurn, streamInto],
+  );
+
+  const handleFeedback = useCallback(
+    (turn: ChatTurn, rating: "up" | "down") => {
+      if (!turn.messageId) return;
+      const previous = turn.feedback ?? null;
+      // 再次点击同一评价 = 清除
+      const next = previous === rating ? null : rating;
+      patchTurn(turn.id, { feedback: next });
+      void setMessageFeedback(turn.messageId, next).catch(() => {
+        patchTurn(turn.id, { feedback: previous });
+      });
+    },
+    [patchTurn],
   );
 
   const handleRetry = useCallback(() => {
@@ -382,7 +452,16 @@ export default function ChatShell({
     );
   }
 
-  const turnsWithRetry = turns.map((t) => (t.error ? { ...t, onRetry: handleRetry } : t));
+  const lastAssistantId = [...turns].reverse().find((t) => t.role === "assistant")?.id;
+  const turnsWithRetry = turns.map((t) => {
+    const decorated: ChatTurn = { ...t, isLastAssistant: t.id === lastAssistantId };
+    if (t.error) decorated.onRetry = handleRetry;
+    if (t.role === "assistant") {
+      decorated.onRegenerate = () => handleRegenerate(t);
+      decorated.onFeedback = (rating) => handleFeedback(t, rating);
+    }
+    return decorated;
+  });
   const sourceCount = sources.length + webSources.length;
 
   return (

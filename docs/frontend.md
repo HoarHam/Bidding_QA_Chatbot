@@ -108,6 +108,18 @@ React 严格模式会双调用副作用，从 effect 里开流会导致同一条
 - 重试通过 `lastAttachmentIdsRef`/`lastAttachmentMetaRef` 保留附件 id 与元数据，
   不会因为清空输入区而丢失。
 
+## 消息操作（复制 / 重新生成 / 反馈）
+
+每条助手回答下方（非 streaming 且有内容时）有一行操作：
+
+- **复制**：`navigator.clipboard.writeText`，成功后在按钮旁短暂显示「已复制」；
+- **重新生成**：仅**最后一条**助手消息显示；调用同一个流式接口并带
+  `regenerate_message_id`，后端原地更新该消息，前端把该 turn 重置为 streaming 状态后重放；
+- **👍/👎**：`aria-pressed` 表示选中态；再次点击同一项清除反馈。请求失败时回滚乐观更新。
+
+这些按钮都依赖持久化消息 id：历史消息来自 `MessageOut.id`，刚生成的消息来自
+`done` 事件的 `message_id`（落库失败时为 null，此时只显示复制）。重新生成后原反馈会被清空。
+
 ## 深度思考
 
 `reasoning` 事件渲染在**默认折叠**的面板里，且**按纯文本渲染**（`whitespace-pre-wrap`），

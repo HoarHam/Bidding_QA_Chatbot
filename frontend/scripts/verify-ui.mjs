@@ -250,6 +250,45 @@ async function main() {
     toolItems > 0 ? `"${toolText.replace(/\s+/g, " ").slice(0, 46)}"` : "未出现工具调用条目",
   );
 
+  // ---------- 消息操作：复制 / 重新生成 / 反馈 ----------
+  const actionsCount = await page.getByTestId("message-actions").count();
+  check("助手消息下方有操作按钮", actionsCount >= 1);
+
+  const feedbackUp = page.getByTestId("feedback-up").last();
+  const feedbackDown = page.getByTestId("feedback-down").last();
+  check(
+    "存在 👍/👎 反馈按钮",
+    (await page.getByTestId("feedback-up").count()) >= 1 &&
+      (await page.getByTestId("feedback-down").count()) >= 1,
+  );
+  check(
+    "最后一条助手消息可重新生成",
+    (await page.getByTestId("regenerate").count()) === 1,
+  );
+
+  // 反馈接口用 mock，避免 UI 冒烟依赖真实后端
+  await page.route("**/api/messages/*/feedback", async (route) => {
+    const body = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ id: "verify-message", feedback: body.rating }),
+    });
+  });
+  await feedbackUp.click();
+  await page.waitForTimeout(200);
+  check(
+    "👍 点击后为选中状态",
+    (await feedbackUp.getAttribute("aria-pressed")) === "true",
+  );
+  await feedbackUp.click();
+  await page.waitForTimeout(200);
+  check(
+    "再次点击清除反馈",
+    (await feedbackUp.getAttribute("aria-pressed")) === "false",
+  );
+  await page.unroute("**/api/messages/*/feedback");
+
   // 参考来源面板应在检索后填充（Agent 路径下来源由 tool_result 带出）
   const sourceCards = await page.locator("aside [class*='rounded-lg']").count();
   check("参考来源面板已填充", sourceCards > 0, `${sourceCards} 条`);

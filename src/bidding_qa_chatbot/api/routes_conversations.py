@@ -68,6 +68,7 @@ def _message_out(msg: Message) -> MessageOut:
         sources=sources,
         web_sources=web_sources,
         attachments=attachments,
+        feedback=getattr(msg, "feedback", None),
         provider=msg.provider,
         model=msg.model,
         created_at=msg.created_at,

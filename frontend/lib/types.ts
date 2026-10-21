@@ -24,6 +24,8 @@ export interface ChatRequest {
   history?: ChatMessage[];
   /** 续接已有会话时传入；为空则新建一个会话。 */
   conversation_id?: string | null;
+  /** 重新生成：要原地替换的助手消息 id（只允许该会话最后一条助手消息）。 */
+  regenerate_message_id?: string | null;
 }
 
 // ---------------------------------------------------------------- 引用来源
@@ -212,6 +214,8 @@ export interface DoneEvent {
   request_id: string;
   /** 本次问答所属会话。前端据此把后续提问接到同一会话上。 */
   conversation_id: string | null;
+  /** 本轮助手消息的持久化 id（反馈/重新生成需要）。 */
+  message_id: string | null;
 }
 
 // ---------------------------------------------------------------- 账号
@@ -254,9 +258,21 @@ export interface MessageOut {
   web_sources: WebSource[];
   /** 用户消息携带的附件元数据（OCR 文本只在服务端）。 */
   attachments: AttachmentOut[];
+  /** 助手消息的用户反馈：up / down / null。 */
+  feedback: "up" | "down" | null;
   provider: string | null;
   model: string | null;
   created_at: string;
+}
+
+export interface FeedbackRequest {
+  /** null 表示清除已有反馈。 */
+  rating: "up" | "down" | null;
+}
+
+export interface FeedbackOut {
+  id: string;
+  feedback: "up" | "down" | null;
 }
 
 export interface ConversationSummary {

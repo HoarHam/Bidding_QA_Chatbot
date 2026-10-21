@@ -1,6 +1,19 @@
 "use client";
 
-import { AlertCircle, Bot, FileText, Loader2, Search, User } from "lucide-react";
+import { useState } from "react";
+import {
+  AlertCircle,
+  Bot,
+  Check,
+  Copy,
+  FileText,
+  Loader2,
+  RefreshCw,
+  Search,
+  ThumbsDown,
+  ThumbsUp,
+  User,
+} from "lucide-react";
 
 import ErrorBanner from "./ErrorBanner";
 import Markdown from "./Markdown";
@@ -28,6 +41,14 @@ export interface ChatTurn {
   attachments?: AttachmentOut[];
   /** 本轮带附件、正在等待后端 OCR 解析。 */
   preparing?: boolean;
+  /** 持久化后的消息 id（反馈/重新生成需要；新消息由 done 事件带回）。 */
+  messageId?: string;
+  /** 助手消息的用户反馈。 */
+  feedback?: "up" | "down" | null;
+  /** 是否为该会话最后一条助手消息（只有它可以重新生成）。 */
+  isLastAssistant?: boolean;
+  onRegenerate?: () => void;
+  onFeedback?: (rating: "up" | "down") => void;
   error?: { message: string; partial: boolean; attempts: AttemptModel[] };
   provider?: string | null;
   model?: string | null;
@@ -72,6 +93,20 @@ function ToolActivityList({ items }: { items: ToolActivity[] }) {
 
 export default function MessageBubble({ turn }: { turn: ChatTurn }) {
   const isUser = turn.role === "user";
+  const [copied, setCopied] = useState(false);
+
+  async function copyAnswer() {
+    try {
+      await navigator.clipboard.writeText(turn.content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪贴板不可用（非安全上下文等）时静默失败，不打断对话
+    }
+  }
+
+  const actionButton =
+    "inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700";
 
   return (
     <div
@@ -132,6 +167,73 @@ export default function MessageBubble({ turn }: { turn: ChatTurn }) {
             </>
           )}
         </div>
+
+        {!isUser && !turn.streaming && turn.content && (
+          <div
+            data-testid="message-actions"
+            className="mt-1 flex items-center gap-0.5 pl-1"
+          >
+            <button
+              type="button"
+              onClick={() => void copyAnswer()}
+              title={copied ? "已复制" : "复制回答"}
+              aria-label="复制回答"
+              className={actionButton}
+            >
+              {copied ? (
+                <Check className="size-3 text-emerald-600" />
+              ) : (
+                <Copy className="size-3" />
+              )}
+            </button>
+
+            {turn.isLastAssistant && turn.messageId && (
+              <button
+                type="button"
+                data-testid="regenerate"
+                onClick={turn.onRegenerate}
+                title="重新生成"
+                aria-label="重新生成"
+                className={actionButton}
+              >
+                <RefreshCw className="size-3" />
+              </button>
+            )}
+
+            {turn.messageId && (
+              <>
+                <button
+                  type="button"
+                  data-testid="feedback-up"
+                  aria-pressed={turn.feedback === "up"}
+                  onClick={() => turn.onFeedback?.("up")}
+                  title="有帮助"
+                  aria-label="有帮助"
+                  className={`${actionButton} ${
+                    turn.feedback === "up" ? "bg-emerald-50 text-emerald-600" : ""
+                  }`}
+                >
+                  <ThumbsUp className="size-3" />
+                </button>
+                <button
+                  type="button"
+                  data-testid="feedback-down"
+                  aria-pressed={turn.feedback === "down"}
+                  onClick={() => turn.onFeedback?.("down")}
+                  title="没有帮助"
+                  aria-label="没有帮助"
+                  className={`${actionButton} ${
+                    turn.feedback === "down" ? "bg-red-50 text-red-600" : ""
+                  }`}
+                >
+                  <ThumbsDown className="size-3" />
+                </button>
+              </>
+            )}
+
+            {copied && <span className="text-[10px] text-slate-400">已复制</span>}
+          </div>
+        )}
 
         {!isUser && (turn.provider || turn.fallbackFrom) && (
           <div className="mt-1 flex flex-wrap items-center gap-2 pl-1 text-[10px] text-slate-400">
