@@ -1,9 +1,25 @@
 "use client";
 
-import { useState } from "react";
-import { Brain, Globe, Send, Square } from "lucide-react";
+import { useRef, useState } from "react";
+import { Brain, FileText, Globe, Loader2, Paperclip, Send, Square, X } from "lucide-react";
 
 import type { Mode } from "@/lib/types";
+
+/** 输入区展示用的附件草稿（上传状态 + 元数据）。 */
+export interface PendingAttachment {
+  id?: string;
+  filename: string;
+  content_type?: string;
+  size: number;
+  status: "uploading" | "ready" | "error";
+  error?: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
 
 /** 示例问题。以真实文本渲染（不是 placeholder），因此**可以被选中复制**。
  *  前三条面向知识库检索（法规/期限类），后三条面向 Neo4j 知识图谱（交易事实/统计）。 */
@@ -39,8 +55,11 @@ export default function Composer({
   webSearch,
   onWebSearchChange,
   webSearchAvailable,
+  attachment,
+  onPickFile,
+  onRemoveAttachment,
 }: {
-  onSend: (text: string) => void;
+  onSend: (text: string, attachmentIds: string[]) => void;
   onStop: () => void;
   busy: boolean;
   mode: Mode;
@@ -48,14 +67,23 @@ export default function Composer({
   webSearch: boolean;
   onWebSearchChange: (enabled: boolean) => void;
   webSearchAvailable: boolean;
+  attachment: PendingAttachment | null;
+  onPickFile: (file: File) => void;
+  onRemoveAttachment: () => void;
 }) {
   const [text, setText] = useState("");
-  const canSend = text.trim().length > 0 && !busy;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const readyIds =
+    attachment?.status === "ready" && attachment.id ? [attachment.id] : [];
+  // 上传中 / 上传失败时禁止发送（避免把不存在的附件 id 发给后端）
+  const attachmentBlocksSend = Boolean(attachment && attachment.status !== "ready");
+  const canSend = text.trim().length > 0 && !busy && !attachmentBlocksSend;
 
   function submit() {
     const value = text.trim();
-    if (!value || busy) return;
-    onSend(value);
+    if (!canSend) return;
+    onSend(value, readyIds);
     setText("");
   }
 
@@ -94,6 +122,53 @@ export default function Composer({
         placeholder="输入招投标相关问题…（Enter 发送，Shift+Enter 换行）"
         className="scrollbar-thin max-h-40 w-full resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-slate-400"
       />
+
+      {/* 隐藏文件选择器：上传只存储，OCR 在发送时由后端执行 */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = ""; // 允许再次选择同一个文件
+          if (file) onPickFile(file);
+        }}
+      />
+
+      {attachment && (
+        <div
+          data-testid="attachment-chip"
+          title={attachment.error}
+          className={`mb-1 flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
+            attachment.status === "error"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-slate-200 bg-slate-50 text-slate-600"
+          }`}
+        >
+          <FileText className="size-3.5 shrink-0" />
+          <span className="max-w-[16rem] truncate" title={attachment.filename}>
+            {attachment.filename}
+          </span>
+          <span className="shrink-0 text-slate-400">{formatSize(attachment.size)}</span>
+          {attachment.status === "uploading" && (
+            <Loader2 className="size-3 shrink-0 animate-spin text-brand-500" />
+          )}
+          {attachment.status === "error" && (
+            <span className="shrink-0 text-red-600">上传失败</span>
+          )}
+          <button
+            type="button"
+            data-testid="attachment-remove"
+            aria-label="移除附件"
+            title="移除附件"
+            onClick={onRemoveAttachment}
+            className="ml-0.5 shrink-0 cursor-pointer text-slate-400 hover:text-red-500"
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      )}
 
       <div className="mt-1 flex items-center justify-between gap-2 px-1">
         <div className="flex items-center gap-1.5">
@@ -141,27 +216,53 @@ export default function Composer({
           </button>
         </div>
 
-        {busy ? (
+        <div className="flex items-center gap-1.5">
+          {/* 上传附件：仅图标，位于发送按钮左侧 */}
           <button
             type="button"
-            onClick={onStop}
-            className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white hover:bg-slate-800"
+            aria-label="上传附件"
+            title="上传附件（PNG/JPEG/WebP/PDF/DOCX，≤10MB）"
+            disabled={busy || attachment?.status === "uploading"}
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex size-[30px] cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:border-brand-500/60 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Square className="size-3" />
-            停止
+            {attachment?.status === "uploading" ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Paperclip className="size-3.5" />
+            )}
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!canSend}
-            title={canSend ? "发送（Enter）" : "请先输入问题"}
-            className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
-            <Send className="size-3" />
-            发送
-          </button>
-        )}
+
+          {busy ? (
+            <button
+              type="button"
+              onClick={onStop}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white hover:bg-slate-800"
+            >
+              <Square className="size-3" />
+              停止
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!canSend}
+              title={
+                canSend
+                  ? "发送（Enter）"
+                  : attachment?.status === "uploading"
+                    ? "附件上传中，请稍候"
+                    : attachment?.status === "error"
+                      ? "请先移除上传失败的附件"
+                      : "请先输入问题"
+              }
+              className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              <Send className="size-3" />
+              发送
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

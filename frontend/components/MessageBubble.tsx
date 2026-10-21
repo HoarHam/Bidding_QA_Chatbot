@@ -1,11 +1,11 @@
 "use client";
 
-import { AlertCircle, Bot, Loader2, Search, User } from "lucide-react";
+import { AlertCircle, Bot, FileText, Loader2, Search, User } from "lucide-react";
 
 import ErrorBanner from "./ErrorBanner";
 import Markdown from "./Markdown";
 import ThinkingPanel from "./ThinkingPanel";
-import type { AttemptModel } from "@/lib/types";
+import type { AttemptModel, AttachmentOut } from "@/lib/types";
 
 /** 一次工具调用及其结果，用于在回答上方展示「正在检索…」。 */
 export interface ToolActivity {
@@ -24,6 +24,10 @@ export interface ChatTurn {
   reasoning?: string;
   tools?: ToolActivity[];
   streaming?: boolean;
+  /** 用户消息携带的附件（元数据；OCR 文本只在服务端）。 */
+  attachments?: AttachmentOut[];
+  /** 本轮带附件、正在等待后端 OCR 解析。 */
+  preparing?: boolean;
   error?: { message: string; partial: boolean; attempts: AttemptModel[] };
   provider?: string | null;
   model?: string | null;
@@ -91,15 +95,39 @@ export default function MessageBubble({ turn }: { turn: ChatTurn }) {
           }`}
         >
           {isUser ? (
-            <p className="text-sm whitespace-pre-wrap">{turn.content}</p>
+            <div>
+              <p className="text-sm whitespace-pre-wrap">{turn.content}</p>
+              {turn.attachments && turn.attachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap justify-end gap-1.5">
+                  {turn.attachments.map((att) => (
+                    <span
+                      key={att.id}
+                      data-testid="attachment-chip"
+                      title={att.filename}
+                      className="inline-flex max-w-full items-center gap-1 rounded-md bg-white/20 px-2 py-0.5 text-[11px] text-white/90"
+                    >
+                      <FileText className="size-3 shrink-0" />
+                      <span className="truncate">{att.filename}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : (
             <>
               <ThinkingPanel text={turn.reasoning ?? ""} streaming={Boolean(turn.streaming)} />
               <ToolActivityList items={turn.tools ?? []} />
               {turn.content ? (
                 <Markdown content={turn.content} />
-              ) : turn.streaming && !turn.tools?.length ? (
-                <span className="inline-block h-3.5 w-1.5 animate-pulse bg-slate-400 align-middle" />
+              ) : turn.streaming ? (
+                turn.preparing ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                    <Loader2 className="size-3 animate-spin" />
+                    正在解析附件…
+                  </span>
+                ) : (
+                  <span className="inline-block h-3.5 w-1.5 animate-pulse bg-slate-400 align-middle" />
+                )
               ) : null}
             </>
           )}

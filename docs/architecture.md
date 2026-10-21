@@ -4,7 +4,8 @@
 （标的物交易频次、中标金额、供应商/采购人/代理机构/地区关联）注入 Neo4j 知识图谱，
 时效性强的外部公开信息可开启联网搜索（Tavily 关键词 / Exa 语义）。它们都注册为 Agent
 工具，由可切换的 LLM 根据问题自行选择，流式作答并在前端展示参考来源（本地/联网分区）
-与工具调用过程。
+与工具调用过程。用户还可以上传图片/PDF/DOCX 附件，由本地 Ollama GLM-OCR 在发送时解析，
+解析文本与问题一起进入 LLM 上下文。
 
 ```mermaid
 flowchart LR
@@ -18,6 +19,7 @@ flowchart LR
         RET["检索层<br/>hybrid → RRF → rerank"]
         GR["图谱层<br/>只读事务 + 参数化模板"]
         WEB["联网层<br/>Tavily 缓存 · Exa API/MCP"]
+        ATT["附件层<br/>上传存储 · PDF/DOCX 提取"]
         LLM["LLM 层<br/>provider 链 + 回退"]
     end
 
@@ -34,9 +36,13 @@ flowchart LR
     subgraph local["本地模型 (CPU)"]
         EMB["bge-small-zh-v1.5<br/>512 维"]
         RRK["bge-reranker-base<br/>CrossEncoder"]
+        OCR["Ollama glm-ocr<br/>附件 OCR"]
     end
 
+    UI -->|"POST /api/attachments"| ATT
     UI -->|"POST /api/chat/stream"| API
+    API --> ATT
+    ATT --> OCR
     API --> AG
     AG -->|"工具：search_bidding_knowledge"| RET
     RET --> EMB
@@ -111,6 +117,10 @@ sequenceDiagram
 - **`web/` 单独成层**：两个引擎的可用性、超时、缓存与降级各成体系（Tavily 有进程内缓存；
   Exa 以 HTTP API 为主、npx MCP 为回退），且只在用户开启时才会被模型看到——
   与检索/图谱共用工具协议，但不共享任何实现细节。
+- **`attachments/` 单独成层**：上传存储/所有权校验、三种格式的文件提取、以及
+  「本轮 + 历史附件」的提示词上下文组装互不耦合；OCR 由 `llm/ocr.py` 的本地
+  Ollama 客户端提供，**不接入 ProviderChain**（冷启动可达 ~2 分钟，且不是文本兜底候选）。
+  解析发生在会话落库之前，失败不会留下空会话或半条用户消息。
 - **`ingestion/` 与 `retrieval/` 分离**：入库是批处理 + CLI，检索是每请求异步，
   两者只共享 `ids.py` 和 `qdrant_store.py`。图谱入库同理放在 `data/batch/to_neo4j.py`
   （离线脚本，不入包）。

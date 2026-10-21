@@ -309,3 +309,61 @@ async def test_list_conversations_empty_for_new_user(api_client):
     resp = await api_client.get("/api/conversations", headers=auth_header(token))
     assert resp.status_code == 200
     assert resp.json() == {"items": [], "total": 0}
+
+
+async def test_recent_user_attachments_is_scoped_and_newest_first(db):
+    """追问注入的查询：只属于本人、最新在前、忽略无附件的消息。"""
+    user1 = await _make_user(db, "a")
+    user2 = await _make_user(db, "b")
+    payload = lambda text: [  # noqa: E731 — 测试内简单构造
+        {
+            "id": text,
+            "filename": f"{text}.png",
+            "content_type": "image/png",
+            "size": 1,
+            "kind": "image",
+            "ocr_text": text,
+        }
+    ]
+
+    async with db.session() as session:
+        conv = await repo.create_conversation(session, user_id=user1.id)
+        await repo.add_message(
+            session,
+            conversation=conv,
+            role="user",
+            content="q1",
+            attachments=payload("第一份"),
+        )
+        await repo.add_message(session, conversation=conv, role="user", content="q2")
+        await repo.add_message(
+            session,
+            conversation=conv,
+            role="user",
+            content="q3",
+            attachments=payload("第二份"),
+        )
+        conv_id = conv.id
+
+        other = await repo.create_conversation(session, user_id=user2.id)
+        await repo.add_message(
+            session,
+            conversation=other,
+            role="user",
+            content="q4",
+            attachments=payload("别人的附件"),
+        )
+
+    async with db.session() as session:
+        rows = await repo.recent_user_attachments(
+            session, user_id=user1.id, conversation_id=conv_id, limit=2
+        )
+    assert [row[0]["ocr_text"] for row in rows] == ["第二份", "第一份"]
+
+    async with db.session() as session:
+        assert (
+            await repo.recent_user_attachments(
+                session, user_id=user2.id, conversation_id=conv_id, limit=2
+            )
+            == []
+        )

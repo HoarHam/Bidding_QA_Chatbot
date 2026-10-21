@@ -68,13 +68,20 @@ class FakeChain:
     """按脚本产出事件；`fail_before` 模拟所有 provider 首 token 前全挂。"""
 
     def __init__(
-        self, script=None, fail_before: Exception | None = None, fail_mid: Exception | None = None
+        self,
+        script=None,
+        fail_before: Exception | None = None,
+        fail_mid: Exception | None = None,
+        complete_result=None,
     ) -> None:
         self.script = script if script is not None else [("text", "根据《政府采购法》")]
         self.fail_before = fail_before
         self.fail_mid = fail_mid
+        self.complete_result = complete_result
+        self.requests: list = []
 
     async def stream_with_fallback(self, req) -> AsyncIterator:
+        self.requests.append(req)
         if self.fail_before is not None:
             raise self.fail_before
         yield ProviderEvent(
@@ -88,10 +95,26 @@ class FakeChain:
         yield StreamEnd(finish_reason="stop", provider="deepseek", model="deepseek-flash")
 
     async def complete(self, req):
-        raise NotImplementedError
+        self.requests.append(req)
+        if self.complete_result is None:
+            raise NotImplementedError
+        return self.complete_result
 
     async def aclose(self) -> None:
         pass
+
+
+class FakeOCR:
+    def __init__(self, text: str = "附件中的文字", error: Exception | None = None) -> None:
+        self.text = text
+        self.error = error
+        self.calls: list[tuple[int, str]] = []
+
+    async def describe_image(self, data: bytes, media_type: str = "image/png") -> str:
+        self.calls.append((len(data), media_type))
+        if self.error is not None:
+            raise self.error
+        return self.text
 
 
 def _make_app(chain, retriever=None, settings=None):
@@ -108,16 +131,18 @@ def _make_app(chain, retriever=None, settings=None):
 
 
 @pytest.fixture
-def client_factory(monkeypatch):
+def client_factory(monkeypatch, tmp_path):
     """构造**已登录**的测试客户端，并把检索器替换成假的。
 
     聊天端点现在要求登录（用户对话历史要落到账号上），所以这里先注册一个用户、
     把 token 挂在客户端默认头上。数据库用内存 SQLite，不碰真实 Postgres。
+    附件存储指向 tmp_path，OCR 注入 FakeOCR，绝不触碰真实文件系统与模型。
     """
     from bidding_qa_chatbot.api import routes_chat
+    from bidding_qa_chatbot.attachments import AttachmentStore
     from bidding_qa_chatbot.db.session import Database
 
-    async def _make(chain, retriever=None):
+    async def _make(chain, retriever=None, *, ocr=None):
         retriever = retriever or FakeRetriever()
 
         async def fake_retrieve(request, body):
@@ -131,6 +156,10 @@ def client_factory(monkeypatch):
 
         app = _make_app(chain, settings=settings)
         app.state.db = db
+        app.state.ocr = ocr or FakeOCR()
+        app.state.attachment_store = AttachmentStore(
+            tmp_path / f"uploads-{uuid.uuid4().hex[:8]}", max_bytes=settings.max_upload_bytes
+        )
 
         # 注册用**临时**客户端：httpx 的 client 只要发过请求就不能再 open，
         # 而测试里是用 `async with client:` 打开的，提前用过会报
@@ -142,6 +171,7 @@ def client_factory(monkeypatch):
 
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
         client.headers["Authorization"] = f"Bearer {token}"
+        client.app = app  # type: ignore[attr-defined] — 测试里直接检查注入的 OCR/DB
         return client
 
     return _make
@@ -632,3 +662,202 @@ def test_all_httpx_timeouts_in_codebase_are_valid():
     assert not offenders, "非法的 httpx.Timeout 调用（必须给默认值或四个参数）: " + "; ".join(
         offenders
     )
+
+
+# ---------------------------------------------------------------- 附件上传与 OCR
+def _make_png() -> bytes:
+    from tests.xlsx_builder import make_png
+
+    return make_png()
+
+
+async def _upload_png(client):
+    return await client.post(
+        "/api/attachments",
+        files={"file": ("招标附件.png", _make_png(), "image/png")},
+    )
+
+
+def _sse_events(text: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for block in text.split("\n\n"):
+        name = data = None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                name = line[6:].strip()
+            elif line.startswith("data:"):
+                data = line[5:].strip()
+        if name and data:
+            events.append((name, json.loads(data)))
+    return events
+
+
+async def test_upload_attachment_stores_without_ocr(client_factory):
+    client = await client_factory(FakeChain())
+    async with client:
+        resp = await _upload_png(client)
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["filename"] == "招标附件.png"
+        assert body["content_type"] == "image/png"
+        uuid.UUID(body["id"])
+        assert client.app.state.ocr.calls == []  # 上传只存储，不解析
+
+
+async def test_upload_rejects_unsupported_type(client_factory):
+    client = await client_factory(FakeChain())
+    async with client:
+        resp = await client.post(
+            "/api/attachments", files={"file": ("a.txt", b"hello", "text/plain")}
+        )
+
+    assert resp.status_code == 415
+    assert resp.json()["error"]["code"] == "unsupported_attachment"
+
+
+async def test_chat_with_attachment_injects_ocr_and_persists(client_factory):
+    from bidding_qa_chatbot.db import repository as repo
+
+    ocr = FakeOCR("附件规定：投标保证金为 2%。")
+    chain = FakeChain()
+    client = await client_factory(chain, ocr=ocr)
+
+    async with client:
+        uploaded = (await _upload_png(client)).json()
+        resp = await client.post(
+            "/api/chat/stream",
+            json={"query": "总结附件", "attachment_ids": [uploaded["id"]]},
+        )
+        assert resp.status_code == 200
+        events = _sse_events(resp.text)
+        conversation_id = next(data for name, data in events if name == "done")["conversation_id"]
+        assert ocr.calls  # 发送时才调用 OCR
+
+        first_request = chain.requests[0]
+        assert "不可信" in first_request.messages[0].content
+        user_content = first_request.messages[-1].content
+        assert "本轮上传附件" in user_content
+        assert "投标保证金为 2%" in user_content
+
+        # 历史只下发公开元数据，不含 OCR 文本
+        detail = (await client.get(f"/api/conversations/{conversation_id}")).json()
+        user_message = next(m for m in detail["messages"] if m["role"] == "user")
+        assert user_message["attachments"][0]["id"] == uploaded["id"]
+        assert "ocr_text" not in user_message["attachments"][0]
+
+        # 数据库里保存了 OCR 文本（仅供后续追问使用）
+        me = (await client.get("/api/auth/me")).json()
+        async with client.app.state.db.session() as session:
+            messages = await repo.list_messages(
+                session,
+                user_id=uuid.UUID(me["id"]),
+                conversation_id=uuid.UUID(conversation_id),
+            )
+        stored = next(m for m in messages if m.role == "user")
+        assert "投标保证金为 2%" in stored.attachments[0]["ocr_text"]
+
+
+async def test_follow_up_injects_prior_attachment_text(client_factory):
+    ocr = FakeOCR("附件 OCR 内容：第一条是资格要求。")
+    chain = FakeChain()
+    client = await client_factory(chain, ocr=ocr)
+
+    async with client:
+        uploaded = (await _upload_png(client)).json()
+        first = await client.post(
+            "/api/chat/stream",
+            json={"query": "总结附件", "attachment_ids": [uploaded["id"]]},
+        )
+        conversation_id = next(data for name, data in _sse_events(first.text) if name == "done")[
+            "conversation_id"
+        ]
+
+        second = await client.post(
+            "/api/chat/stream",
+            json={"query": "第一条是什么？", "conversation_id": conversation_id},
+        )
+        assert second.status_code == 200
+        user_content = chain.requests[1].messages[-1].content
+        assert "本会话较早轮次附件" in user_content
+        assert "第一条是资格要求" in user_content
+
+
+async def test_attachment_ocr_failure_returns_json_without_side_effects(client_factory):
+    from bidding_qa_chatbot.llm.ocr import OCRUnavailable
+
+    chain = FakeChain()
+    client = await client_factory(chain, ocr=FakeOCR(error=OCRUnavailable("模型未启动")))
+
+    async with client:
+        uploaded = (await _upload_png(client)).json()
+        resp = await client.post(
+            "/api/chat/stream",
+            json={"query": "总结附件", "attachment_ids": [uploaded["id"]]},
+        )
+
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "ocr_unavailable"
+        conversations = (await client.get("/api/conversations")).json()
+        assert conversations["total"] == 0
+        assert chain.requests == []
+
+
+async def test_one_shot_chat_with_attachment_skips_no_context(client_factory):
+    from types import SimpleNamespace
+
+    result = SimpleNamespace(
+        text="根据附件，资格要求如下。",
+        reasoning=None,
+        provider="fake",
+        model="fake-model",
+        finish_reason="stop",
+        usage=None,
+    )
+    chain = FakeChain(complete_result=result)
+    client = await client_factory(chain, retriever=FakeRetriever([]), ocr=FakeOCR("附件关键条款"))
+
+    async with client:
+        uploaded = (await _upload_png(client)).json()
+        resp = await client.post(
+            "/api/chat",
+            json={"query": "总结附件", "attachment_ids": [uploaded["id"]]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["answer"] == "根据附件，资格要求如下。"
+        assert "附件关键条款" in chain.requests[0].messages[-1].content
+
+
+def test_message_out_exposes_attachment_metadata_only():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from bidding_qa_chatbot.api.routes_conversations import _message_out
+
+    msg = SimpleNamespace(
+        id=uuid.uuid4(),
+        role="user",
+        content="总结附件",
+        reasoning=None,
+        sources=[],
+        web_sources=None,
+        attachments=[
+            {
+                "id": "a1",
+                "filename": "a.png",
+                "content_type": "image/png",
+                "size": 10,
+                "kind": "image",
+                "ocr_text": "不应下发的秘密文本",
+            }
+        ],
+        provider=None,
+        model=None,
+        created_at=datetime.now(UTC),
+    )
+
+    out = _message_out(msg)
+
+    assert [a.filename for a in out.attachments] == ["a.png"]
+    assert not hasattr(out.attachments[0], "ocr_text")

@@ -138,3 +138,5 @@ uv run python -c "import yaml,io; yaml.safe_load(io.open('.workflow/ci.yml',enco
 - [ ] 模型权重已随镜像或数据卷预置——否则首次启动会去下载约 1.2GB
 - [ ] `ENABLE_INGEST_ENDPOINT=false`（入库走 CLI，不暴露 HTTP）
 - [ ] Qdrant Cloud 集群未因闲置被暂停
+- [ ] 附件OCR：目标机已部署 Ollama 与 `glm-ocr:latest`，`OLLAMA_OCR_BASE_URL` 指向本机原生 API
+- [ ] `DATA_DIR/uploads`（默认 `data/uploads`）放在持久化卷上；不要把该目录暴露为静态站点

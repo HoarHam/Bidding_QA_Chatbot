@@ -69,6 +69,21 @@ Windows Schannel 在吊销服务器不可达时报 `CRYPT_E_REVOCATION_OFFLINE`�
   MCP（auto）与 API（neural）的结果集实测不重叠，不要试图「另查一次再按 URL 补分」——
   语义搜索因此以 API 为主。
 
+### 8. 附件 OCR（本地 GLM-OCR）
+
+- **OCR 走 Ollama 原生 `/api/generate`**，配置项是 `OLLAMA_OCR_BASE_URL`
+  （默认 `http://localhost:11434`，**不带 `/v1`**）。`OLLAMA_BASE_URL` 以 `/v1` 结尾，
+  那是给 OpenAI 兼容文本 provider 用的，两者不要混用。
+- **冷启动可达 ~2 分钟、热调用 <1s（已设 keep_alive 常驻）**。发送带附件的消息会在开流前等待 OCR，
+  前端显示「正在解析附件…」，超时默认 180s。
+- 模型运行时默认上下文只有 4096，必须显式设置 `OLLAMA_OCR_NUM_CTX`（默认 16384），
+  否则长文档会被截断。
+- PDF 用 PyMuPDF 渲染（200 DPI、最多 10 页、拒绝加密 PDF）；DOCX 用 python-docx
+  提取正文/表格，并从 `word/media/*` 读图片（最多 5 张，跳过 EMF/WMF）。
+  两个库都在函数内懒导入，未使用附件功能时不增加启动成本。
+- 上传文件落在 `data/uploads/<user_id>/`（gitignored，不挂静态路由）；
+  超过 7 天的文件在上传时清理。历史消息里的 OCR 文本在数据库，不受清理影响。
+
 ## 测试
 
 ```bash

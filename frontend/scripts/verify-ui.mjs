@@ -177,6 +177,56 @@ async function main() {
   const sendCount = await page.getByRole("button", { name: "发送", exact: true }).count();
   check("页面上只有 1 个「发送」按钮", sendCount === 1, `实际 ${sendCount} 个`);
 
+  // ---------- 上传附件按钮与附件 chip ----------
+  const attachButton = page.getByRole("button", { name: "上传附件", exact: true });
+  check("上传附件按钮存在且唯一", (await attachButton.count()) === 1);
+  check("上传附件按钮为纯图标", (await attachButton.innerText()).trim() === "");
+
+  const sendButton = page.getByRole("button", { name: "发送", exact: true });
+  const [attachBox, sendBox] = await Promise.all([
+    attachButton.boundingBox(),
+    sendButton.boundingBox(),
+  ]);
+  check(
+    "上传附件按钮位于发送按钮左侧",
+    Boolean(attachBox && sendBox && attachBox.x + attachBox.width <= sendBox.x),
+    `attach.x=${attachBox?.x}, send.x=${sendBox?.x}`,
+  );
+
+  const fileInput = page.locator('input[type="file"]');
+  check("存在隐藏的文件选择器", (await fileInput.count()) === 1);
+
+  // 上传接口用 mock，避免 UI 冒烟依赖真实 OCR/后端
+  await page.route("**/api/attachments", async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "verify-attachment",
+        filename: "verify.png",
+        content_type: "image/png",
+        size: 4,
+      }),
+    });
+  });
+  await fileInput.setInputFiles({
+    name: "verify.png",
+    mimeType: "image/png",
+    buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  });
+  await page.getByTestId("attachment-chip").waitFor();
+  check(
+    "选择文件后显示附件 chip",
+    (await page.getByTestId("attachment-chip").count()) === 1,
+  );
+  await page.getByTestId("attachment-remove").click();
+  await page.waitForTimeout(200);
+  check(
+    "移除附件后 chip 消失",
+    (await page.getByTestId("attachment-chip").count()) === 0,
+  );
+  await page.unroute("**/api/attachments");
+
   // ---------- 流式渲染（本次新增的核心检查）----------
   await page.locator("textarea").type("请简要说明投标保证金的退还规定。", { delay: 10 });
   await page.getByRole("button", { name: "发送", exact: true }).click();

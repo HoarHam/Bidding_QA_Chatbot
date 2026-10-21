@@ -120,3 +120,8 @@ def test_validate_runtime_requires_web_search_keys_when_enabled():
 def test_validate_runtime_ignores_web_keys_when_disabled():
     problems = validate_runtime(_settings(enable_web_search=False))
     assert not [p for p in problems if "WEB_SEARCH" in p]
+
+
+def test_uploads_dir_derives_from_data_dir(tmp_path):
+    settings = _settings(data_dir=tmp_path)
+    assert settings.uploads_dir == tmp_path / "uploads"

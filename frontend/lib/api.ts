@@ -3,6 +3,7 @@
 import { authHeaders } from "./auth";
 import { consumeSSE, type SSEHandler } from "./sse";
 import type {
+  AttachmentOut,
   ChatRequest,
   ConversationDetail,
   ConversationListResponse,
@@ -103,6 +104,41 @@ export async function searchConversations(query: string): Promise<SearchResponse
   );
   if (!res.ok) throw new Error(`搜索失败（HTTP ${res.status}）`);
   return (await res.json()) as SearchResponse;
+}
+
+/**
+ * 上传附件（发送前暂存，OCR 在发送时由后端执行）。
+ *
+ * **不要手动设置 content-type**：multipart 的 boundary 必须由浏览器生成。
+ */
+export async function uploadAttachment(
+  file: File,
+  signal?: AbortSignal,
+): Promise<AttachmentOut> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${baseUrl()}/api/attachments`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+    signal,
+  });
+
+  if (!res.ok) {
+    let message = `上传失败（HTTP ${res.status}）`;
+    try {
+      const body = (await res.json()) as {
+        error?: { message?: string };
+        detail?: string;
+      };
+      message = body.error?.message ?? body.detail ?? message;
+    } catch {
+      // 非 JSON 错误体：保留默认文案
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as AttachmentOut;
 }
 
 /** 发起流式问答。返回的 Promise 在流消费完毕后 resolve。 */

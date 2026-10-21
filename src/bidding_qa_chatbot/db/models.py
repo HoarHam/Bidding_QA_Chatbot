@@ -28,6 +28,11 @@ from bidding_qa_chatbot.db.base import Base
 #: 可移植的 JSON 类型：Postgres 用 JSONB，其余退化为 JSON
 JSONType = sa.JSON().with_variant(JSONB, "postgresql")
 
+#: 附件列专用：Python None 写成 **SQL NULL**（而不是 JSON "null"）。
+#: 否则 `attachments IS NOT NULL` 会把每条无附件消息也当成有值，
+#: 追问注入的 limit 会被空消息挤占。
+AttachmentJSONType = sa.JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -108,6 +113,9 @@ class Message(Base):
     reasoning: Mapped[str | None] = mapped_column(sa.Text, default=None)
     #: 引用来源（SourceRef 列表）。回看历史时用来核对依据。
     sources: Mapped[list | None] = mapped_column(JSONType, default=None)
+    #: 用户消息携带的附件元数据 + OCR 文本（仅随消息整体读写）。
+    #: 对外接口只下发元数据，OCR 文本用于同一会话的追问上下文。
+    attachments: Mapped[list | None] = mapped_column(AttachmentJSONType, default=None)
     provider: Mapped[str | None] = mapped_column(sa.String(32), default=None)
     model: Mapped[str | None] = mapped_column(sa.String(128), default=None)
     created_at: Mapped[datetime] = mapped_column(

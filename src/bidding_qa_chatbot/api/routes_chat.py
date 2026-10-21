@@ -26,6 +26,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from bidding_qa_chatbot.api.sse import HEARTBEAT_FRAME, SSE_HEADERS, encode_event
+from bidding_qa_chatbot.attachments import (
+    AttachmentContext,
+    AttachmentError,
+    build_attachment_context,
+    prepare_attachments,
+)
 from bidding_qa_chatbot.auth.deps import CurrentUser
 from bidding_qa_chatbot.config import Settings
 from bidding_qa_chatbot.db import repository as repo
@@ -85,6 +91,67 @@ async def _retrieve(request: Request, body: ChatRequest):
     return await retriever.retrieve(body.query, top_k=body.top_k)
 
 
+async def _load_attachment_context(request: Request, user, body: ChatRequest) -> AttachmentContext:
+    """解析本轮附件并加载最近的历史附件文本。
+
+    必须在 `_resolve_conversation` **之前**调用：OCR 失败时不能创建会话/落用户消息。
+    """
+    settings: Settings = request.app.state.settings
+    store = getattr(request.app.state, "attachment_store", None)
+    ocr = getattr(request.app.state, "ocr", None)
+
+    prepared = []
+    if body.attachment_ids:
+        if ocr is None:
+            raise AttachmentError("ocr_unavailable", "附件解析服务未初始化", status_code=503)
+        if store is None:
+            from bidding_qa_chatbot.attachments import AttachmentStore
+
+            store = AttachmentStore(settings.uploads_dir, max_bytes=settings.max_upload_bytes)
+            request.app.state.attachment_store = store
+        prepared = await prepare_attachments(
+            settings=settings,
+            store=store,
+            ocr=ocr,
+            user_id=user.id,
+            attachment_ids=body.attachment_ids,
+        )
+
+    # 追问：取最近带附件用户消息的 OCR 文本（必须早于当前消息落库，并按 id 去重）
+    prior_rows: list[list[dict]] = []
+    if body.conversation_id:
+        try:
+            conversation_uuid = uuid.UUID(body.conversation_id)
+        except ValueError:
+            conversation_uuid = None
+        db = getattr(request.app.state, "db", None)
+        if conversation_uuid is not None and db is not None:
+            try:
+                async with db.session() as session:
+                    prior_rows = await repo.recent_user_attachments(
+                        session,
+                        user_id=user.id,
+                        conversation_id=conversation_uuid,
+                        limit=settings.attachment_recent_limit,
+                    )
+            except Exception as exc:  # noqa: BLE001 — 追问上下文是增强项，失败不阻塞
+                logger.warning("读取历史附件失败（本轮继续）: %s", redact(str(exc)))
+
+    return build_attachment_context(
+        prepared,
+        prior_rows,
+        max_current_chars=settings.max_attachment_chars,
+        max_prior_chars=settings.max_prior_attachment_chars,
+    )
+
+
+def _attachment_error_response(request_id: str, exc: AttachmentError) -> JSONResponse:
+    payload = ApiErrorResponse(error=ApiError(code=exc.code, message=str(exc)))
+    response = JSONResponse(status_code=exc.status_code, content=payload.model_dump(mode="json"))
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 @router.post("/retrieve", response_model=RetrieveResponse)
 async def retrieve_only(body: ChatRequest, request: Request, user: CurrentUser) -> RetrieveResponse:
     """只检索不生成。便于单独排查检索质量，不消耗 LLM 配额。"""
@@ -94,8 +161,14 @@ async def retrieve_only(body: ChatRequest, request: Request, user: CurrentUser) 
     )
 
 
-async def _resolve_conversation(request: Request, user, body: ChatRequest):
-    """解析或新建会话，并**立即提交**用户消息。
+async def _resolve_conversation(
+    request: Request,
+    user,
+    body: ChatRequest,
+    *,
+    attachments: list[dict] | None = None,
+):
+    """解析或新建会话，并**立即提交**用户消息（含附件元数据与 OCR 文本）。
 
     刻意不复用请求作用域的 `DbSession`：它的提交发生在响应**完全发送之后**
     （StreamingResponse 的依赖清理在流结束才执行）。那样会有两个后果：
@@ -126,6 +199,7 @@ async def _resolve_conversation(request: Request, user, body: ChatRequest):
             conversation=conversation,
             role="user",
             content=body.query,
+            attachments=attachments,
             title_from=True,  # 首条用户消息顺带定标题
         )
         return str(conversation.id)
@@ -192,8 +266,16 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     chain: ProviderChain = request.app.state.chain
     request_id = uuid.uuid4().hex
 
+    # 附件必须在会话/用户消息落库**之前**解析：OCR 失败时不产生任何副作用。
+    try:
+        attachment_ctx = await _load_attachment_context(request, user, body)
+    except AttachmentError as exc:
+        return _attachment_error_response(request_id, exc)
+
     # 会话与用户消息在**开流之前**落地（独立事务，见 _resolve_conversation 的说明）
-    conversation_id = await _resolve_conversation(request, user, body)
+    conversation_id = await _resolve_conversation(
+        request, user, body, attachments=attachment_ctx.persisted or None
+    )
 
     agent = getattr(request.app.state, "agent", None)
     use_agent = bool(settings.agent_enabled and agent is not None)
@@ -220,16 +302,33 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                 body.history,
                 graph_enabled=graph_enabled,
                 web_search_enabled=web_enabled,
+                attachment_text=attachment_ctx.current_text,
+                prior_attachment_text=attachment_ctx.prior_text,
             ),
             body.mode,
             allowed_tools=allowed_tools,
         )
     else:
-        result = await _retrieve(request, body)
+        try:
+            result = await _retrieve(request, body)
+        except HTTPException:
+            if not attachment_ctx.has_text:
+                raise
+            # 附件问题不应被本地编码器缺失拖死：降级为空检索继续作答
+            from bidding_qa_chatbot.retrieval.service import RetrievalResult
+
+            logger.warning("检索不可用，但存在附件文本：降级为空检索继续")
+            result = RetrievalResult(sources=[], elapsed_ms=0)
         initial_sources = [s.to_ref() for s in result.sources]
         initial_elapsed = result.elapsed_ms
         context = build_context(result.sources, settings.max_context_chars)
-        messages = build_messages(body.query, context, body.history)
+        messages = build_messages(
+            body.query,
+            context,
+            body.history,
+            attachment_text=attachment_ctx.current_text,
+            prior_attachment_text=attachment_ctx.prior_text,
+        )
         source_iter = chain.stream_with_fallback(LLMRequest(messages=messages, mode=body.mode))
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -534,7 +633,9 @@ def _error_response(request_id: str, exc: Exception) -> JSONResponse:
 
 # ------------------------------------------------------------------ 一次性
 @router.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest, request: Request, user: CurrentUser) -> ChatResponse:
+async def chat(
+    body: ChatRequest, request: Request, user: CurrentUser
+) -> ChatResponse | JSONResponse:
     import time
 
     settings: Settings = request.app.state.settings
@@ -542,14 +643,36 @@ async def chat(body: ChatRequest, request: Request, user: CurrentUser) -> ChatRe
     request_id = uuid.uuid4().hex
     started = time.perf_counter()
 
-    conversation_id = await _resolve_conversation(request, user, body)
+    try:
+        attachment_ctx = await _load_attachment_context(request, user, body)
+    except AttachmentError as exc:
+        return _attachment_error_response(request_id, exc)
 
-    result = await _retrieve(request, body)
+    conversation_id = await _resolve_conversation(
+        request, user, body, attachments=attachment_ctx.persisted or None
+    )
+
+    try:
+        result = await _retrieve(request, body)
+    except HTTPException:
+        if not attachment_ctx.has_text:
+            raise
+        from bidding_qa_chatbot.retrieval.service import RetrievalResult
+
+        logger.warning("检索不可用，但存在附件文本：降级为空检索继续")
+        result = RetrievalResult(sources=[], elapsed_ms=0)
+
     context = build_context(result.sources, settings.max_context_chars)
-    messages = build_messages(body.query, context, body.history)
+    messages = build_messages(
+        body.query,
+        context,
+        body.history,
+        attachment_text=attachment_ctx.current_text,
+        prior_attachment_text=attachment_ctx.prior_text,
+    )
     sources = [s.to_ref() for s in result.sources]
 
-    if not result.sources:
+    if not result.sources and not attachment_ctx.has_text:
         await _persist_assistant(
             request,
             user=user,
@@ -557,6 +680,7 @@ async def chat(body: ChatRequest, request: Request, user: CurrentUser) -> ChatRe
             content=NO_CONTEXT_REPLY,
             reasoning=None,
             sources=[],
+            web_sources=[],
             provider="none",
             model="none",
         )
@@ -583,6 +707,7 @@ async def chat(body: ChatRequest, request: Request, user: CurrentUser) -> ChatRe
         content=llm_result.text,
         reasoning=llm_result.reasoning,
         sources=[s.model_dump(mode="json") for s in sources],
+        web_sources=[],
         provider=llm_result.provider,
         model=llm_result.model,
     )

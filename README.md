@@ -9,6 +9,10 @@ Neo4j 知识图谱里；时效性强的外部公开信息可以开启联网搜�
 由大模型根据问题自行选择，再交给可自动回退的 LLM 流式作答，并在界面上展示参考来源
 （本地知识库 / 联网搜索分区）与工具调用过程。
 
+**附件上传与解析**：消息可携带 PNG/JPEG/WebP/PDF/DOCX 附件；发送时由本地 Ollama 的
+GLM-OCR 解析（PDF 逐页渲染、DOCX 提取正文与内嵌图片），解析结果与用户问题一起交给 LLM。
+附件随消息持久化，同一会话的后续追问会自动带上最近附件的 OCR 内容。
+
 **四个工具，按问题类型自动路由**：
 
 - `search_bidding_knowledge`——法规条款、期限、门槛、资格条件等规范性知识（检索 + 标注出处）；
@@ -17,8 +21,8 @@ Neo4j 知识图谱里；时效性强的外部公开信息可以开启联网搜�
 - `search_web_semantic`——Exa 语义联网搜索（Exa HTTP API 为主、npx MCP 回退）。
 
 > 状态：RAG 检索、账号与对话历史（PostgreSQL）、知识图谱查询（Neo4j，`ENABLE_NEO4J=true`）、
-> 联网搜索（`ENABLE_WEB_SEARCH=true`）均已实现。图谱数据由 `data/batch/to_neo4j.py`
-> 注入（可重复执行）。
+> 联网搜索（`ENABLE_WEB_SEARCH=true`）、附件上传与 GLM-OCR 解析均已实现。图谱数据由
+> `data/batch/to_neo4j.py` 注入（可重复执行）。
 
 ## 运行条件
 
@@ -29,6 +33,7 @@ Neo4j 知识图谱里；时效性强的外部公开信息可以开启联网搜�
 | Node.js | 20+ | 前端运行时；后端 Exa 的 MCP 回退也通过 npx 拉起（主路径是 Exa HTTP API） |
 | npm | 10+ | 前端包管理 |
 | Qdrant | Cloud 或本地 | 需要 **Named Vectors + Prefetch/RRF**（1.10+，实测云服务 1.19.1） |
+| Ollama | 0.30+ | 附件 OCR 需要本地 `glm-ocr:latest`（`ollama pull glm-ocr`）；无需 GPU，CPU 可跑 |
 
 安装依赖：
 
@@ -138,6 +143,7 @@ flowchart LR
 | 稀疏检索 | jieba 分词 + BM25（自实现，词表持久化） |
 | 大模型 | DeepSeek（OpenAI SDK）+ 智谱（zai-sdk），失败自动回退 |
 | 视觉解析 | `glm-4.6v-flashx`（解析语料内嵌图片） |
+| 附件解析 | 本地 Ollama `glm-ocr:latest`（原生 `/api/generate`）；PDF 用 PyMuPDF 渲染、DOCX 用 python-docx |
 | 文档渲染 | react-markdown + remark-gfm（含 GFM 表格） |
 
 更详细的说明见 `docs/`：架构、入库、检索、API、前端、开发、部署。

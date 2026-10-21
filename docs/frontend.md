@@ -6,7 +6,7 @@
 flowchart TD
     Page["app/page.tsx<br/>Server Component<br/>SSR 拉取 /api/stats"] --> Shell["ChatShell<br/>Client · 状态机"]
     Shell --> List["MessageList<br/>滚动 + 回到底部"]
-    Shell --> Composer["Composer<br/>输入 + 模式切换 + 联网搜索开关"]
+    Shell --> Composer["Composer<br/>输入 + 模式切换 + 联网搜索 + 上传附件"]
     Shell --> Panel["SourcesPanel<br/>参考来源（本地 / 联网分区）"]
     List --> Bubble["MessageBubble"]
     Bubble --> Thinking["ThinkingPanel<br/>深度思考（折叠）"]
@@ -94,6 +94,19 @@ React 严格模式会双调用副作用，从 effect 里开流会导致同一条
 输入区底部有两个并排的开关：**深度思考**（默认关闭 = 快速模式，点击切换）与
 **联网搜索**（服务端能力来自 `/api/stats` 的 `web_search_available`，不可用时置灰
 并给出 tooltip）。两者状态都跨发送保持。
+
+## 附件上传与解析
+
+- 「发送」左侧是**仅图标**的上传附件按钮（`Paperclip`，`aria-label="上传附件"`），
+  点击打开隐藏的 `<input type="file">`；支持 PNG/JPEG/WebP/PDF/DOCX。
+- **选择即上传**：`POST /api/attachments`（multipart，不经 Next 任何缓冲）；chip 显示
+  上传中/就绪/失败，可移除。**上传时不解析**——OCR 由后端在发送时执行。
+- 发送时请求体带 `attachment_ids`；助手气泡在等待期间显示「正在解析附件…」
+  （GLM-OCR 冷启动可达 ~2 分钟）。OCR 失败时后端返回 JSON 错误，chip 仍留在输入区可重试。
+- 用户消息落库后，历史回载会带 `MessageOut.attachments`，气泡里渲染不可移除的附件 chip；
+  OCR 文本不在前端出现。同一会话的后续追问由后端自动带上最近附件的 OCR 内容。
+- 重试通过 `lastAttachmentIdsRef`/`lastAttachmentMetaRef` 保留附件 id 与元数据，
+  不会因为清空输入区而丢失。
 
 ## 深度思考
 

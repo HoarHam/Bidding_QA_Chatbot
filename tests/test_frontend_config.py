@@ -140,3 +140,39 @@ def test_only_one_send_button_label():
     assert literal_count <= 1, (
         f"Composer 里出现了 {literal_count} 处独立的「发送」文案，应只有发送按钮一处"
     )
+
+
+def test_attach_button_is_icon_only_with_hidden_file_input():
+    """上传附件按钮只显示图标，且 file input 不能带 placeholder。"""
+    source = COMPOSER.read_text(encoding="utf-8")
+    assert "Paperclip" in source, "上传附件按钮应使用 Paperclip 图标"
+    assert 'aria-label="上传附件"' in source, "图标按钮必须有可访问名称"
+    assert ">上传附件<" not in source, "上传附件按钮应只显示图标，不能有可见文字"
+    assert 'type="file"' in source, "Composer 应包含隐藏的文件选择器"
+    assert ".pdf" in source and ".docx" in source, "文件选择器应支持 PDF / DOCX"
+
+    file_input = re.search(r'<input[\s\S]*?type="file"[\s\S]*?/>', source)
+    assert file_input is not None
+    assert "placeholder" not in file_input.group(0), (
+        "file input 不要加 placeholder——静态检查会把它误认为输入框的 placeholder"
+    )
+
+
+def test_upload_helper_uses_multipart_without_manual_content_type():
+    """上传必须用 FormData，且不能手动设置 content-type（boundary 由浏览器生成）。"""
+    api = (FRONTEND / "lib" / "api.ts").read_text(encoding="utf-8")
+    assert "FormData" in api
+    assert 'form.append("file"' in api
+
+    start = api.index("export async function uploadAttachment")
+    end = api.index("/** 发起流式问答", start)
+    block = api[start:end]
+    assert "content-type" not in block.lower(), (
+        "手动设置 multipart 的 content-type 会丢掉 boundary，FastAPI 无法解析"
+    )
+
+
+def test_chat_shell_sends_attachment_ids():
+    shell = (FRONTEND / "components" / "ChatShell.tsx").read_text(encoding="utf-8")
+    assert "attachment_ids: attachmentIds" in shell
+    assert "uploadAttachment" in shell

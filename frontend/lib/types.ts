@@ -18,6 +18,8 @@ export interface ChatRequest {
   mode?: Mode;
   /** 用户是否在本轮开启联网搜索（前端开关）。仅当服务端也启用时才真正生效。 */
   web_search?: boolean;
+  /** 本轮携带的附件 id（先经 /api/attachments 上传）。当前只支持单个附件。 */
+  attachment_ids?: string[];
   top_k?: number | null;
   history?: ChatMessage[];
   /** 续接已有会话时传入；为空则新建一个会话。 */
@@ -42,6 +44,14 @@ export interface SourceRef {
   /** 展示给用户的相关性分数（CrossEncoder）。 */
   rerank_score: number | null;
   images: SourceImage[];
+}
+
+/** 附件元数据（OCR 文本只在服务端，不下发）。 */
+export interface AttachmentOut {
+  id: string;
+  filename: string;
+  content_type: string;
+  size: number;
 }
 
 /** 联网搜索的一条结果（与本地知识库来源分开，参考来源面板分区展示）。 */
@@ -242,6 +252,8 @@ export interface MessageOut {
   sources: SourceRef[];
   /** 联网搜索来源（与本地来源分开返回）。 */
   web_sources: WebSource[];
+  /** 用户消息携带的附件元数据（OCR 文本只在服务端）。 */
+  attachments: AttachmentOut[];
   provider: string | null;
   model: string | null;
   created_at: string;

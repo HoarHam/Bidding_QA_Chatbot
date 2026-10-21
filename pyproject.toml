@@ -54,6 +54,14 @@ dependencies = [
     # MCP 客户端：npx 拉起 exa-mcp-server（语义搜索）。
     # 锁 1.x：2.x 改用 httpx2，与 openai 3.x 同类风险（会让 respx 拦截失效）。
     "mcp>=1.30,<2",
+    # --- 附件上传与解析 ---
+    # FastAPI 的 UploadFile/multipart 解析（此前只是 mcp 的传递依赖）
+    "python-multipart>=0.0.32,<0.1",
+    # PDF 渲染（逐页转 PNG 后交给 GLM-OCR）。锁 <2：镜像已有 2.0，
+    # 但 2.x 是大版本，避免 API 漂移；1.24.x 提供 cp312 Windows 轮子。
+    "pymupdf>=1.24.10,<2",
+    # DOCX 正文/表格提取（内嵌图片用 zipfile 另行读取）
+    "python-docx>=1.2,<2",
 ]
 
 [project.optional-dependencies]

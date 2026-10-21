@@ -9,6 +9,7 @@
 |---|---|---|
 | POST | `/api/chat/stream` | **SSE 流式问答**（主入口） |
 | POST | `/api/chat` | 一次性 JSON 回答 |
+| POST | `/api/attachments` | 上传附件（multipart；只存储，发送时才 OCR） |
 | POST | `/api/retrieve` | **只检索不生成**，便于单独排查检索质量、不消耗 LLM 额度 |
 | GET | `/api/sources/{chunk_id}` | 分块完整记录 |
 | GET | `/api/sources/{chunk_id}/images/{index}` | 分块内嵌图片（PNG） |
@@ -21,8 +22,17 @@
 请求：
 
 ```json
-{"query": "投标保证金的退还期限是多久？", "mode": "fast", "web_search": false, "history": [], "top_k": null}
+{"query": "投标保证金的退还期限是多久？", "mode": "fast", "web_search": false, "attachment_ids": [], "history": [], "top_k": null}
 ```
+
+### 附件
+
+1. 先 `POST /api/attachments`（`multipart/form-data`，字段名 `file`，需 Bearer token）上传；
+   返回 `{id, filename, content_type, size}`。支持 PNG/JPEG/WebP/PDF/DOCX，上限 10MB。
+2. 聊天请求带上 `attachment_ids: ["<id>"]`（当前最多 1 个）。后端在**开流之前**调用本地
+   GLM-OCR 解析；解析失败返回 JSON 错误（400/404/413/415/422/503），**不创建会话、不落用户消息**。
+3. 历史消息的 `MessageOut.attachments` 只返回元数据，OCR 文本仅服务端保存（用于同会话追问）。
+   同一会话后续不带附件的提问会自动带上最近一次附件的 OCR 文本。
 
 `mode` 取 `fast` 或 `thinking`。`web_search` 为用户端「联网搜索」开关：
 只有当服务端 `ENABLE_WEB_SEARCH=true` 且本请求为 `true` 时，模型才会看到联网工具；

@@ -10,6 +10,7 @@ from bidding_qa_chatbot.auth.deps import CurrentUser, DbSession
 from bidding_qa_chatbot.db import repository as repo
 from bidding_qa_chatbot.db.models import Conversation, Message
 from bidding_qa_chatbot.schemas import (
+    AttachmentOut,
     ConversationDetail,
     ConversationListResponse,
     ConversationSummary,
@@ -50,6 +51,15 @@ def _message_out(msg: Message) -> MessageOut:
                 sources.append(SourceRef.model_validate(item))
         except Exception:  # noqa: BLE001
             continue
+    # 附件只回传公开元数据；ocr_text / kind 等服务端字段由 AttachmentOut 过滤掉。
+    raw_attachments = getattr(msg, "attachments", None) or []
+    attachments: list[AttachmentOut] = []
+    for item in raw_attachments:
+        try:
+            attachments.append(AttachmentOut.model_validate(item))
+        except Exception:  # noqa: BLE001 — 单条附件损坏不影响整个会话
+            continue
+
     return MessageOut(
         id=str(msg.id),
         role=msg.role,  # type: ignore[arg-type]
@@ -57,6 +67,7 @@ def _message_out(msg: Message) -> MessageOut:
         reasoning=msg.reasoning,
         sources=sources,
         web_sources=web_sources,
+        attachments=attachments,
         provider=msg.provider,
         model=msg.model,
         created_at=msg.created_at,

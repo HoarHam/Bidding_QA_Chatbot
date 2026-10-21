@@ -169,6 +169,7 @@ async def add_message(
     content: str,
     reasoning: str | None = None,
     sources: list | None = None,
+    attachments: list | None = None,
     provider: str | None = None,
     model: str | None = None,
     title_from: bool = False,
@@ -191,6 +192,7 @@ async def add_message(
         reasoning=reasoning,
         # 归一化后再写入：调用方可能传的是 SourceRef 这类 pydantic 对象
         sources=_json_safe(sources),
+        attachments=_json_safe(attachments),
         provider=provider,
         model=model,
     )
@@ -232,6 +234,34 @@ async def list_messages(
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def recent_user_attachments(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    limit: int = 1,
+) -> list[list[dict]]:
+    """取该会话最近 N 条「带附件」的用户消息的附件列表（最新在前）。
+
+    用于同一会话的追问：把最近附件的 OCR 文本注入新一轮提示词。
+    查询必须带 user_id（与文件里所有查询一致），避免越权读取他人附件文本。
+    """
+    stmt = (
+        sa.select(Message.attachments)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(
+            Message.conversation_id == conversation_id,
+            Conversation.user_id == user_id,
+            Message.role == "user",
+            Message.attachments.is_not(None),
+        )
+        .order_by(Message.seq.desc())
+        .limit(max(1, limit))
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [row for row in rows if isinstance(row, list)]
 
 
 # ------------------------------------------------------------------ 搜索

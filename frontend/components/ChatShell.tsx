@@ -4,15 +4,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BookOpen, Loader2 } from "lucide-react";
 
-import Composer from "./Composer";
+import Composer, { type PendingAttachment } from "./Composer";
 import ConversationSidebar from "./ConversationSidebar";
 import MessageList from "./MessageList";
 import SourcesPanel from "./SourcesPanel";
 import type { ChatTurn, ToolActivity } from "./MessageBubble";
-import { getConversation, streamChat } from "@/lib/api";
+import { getConversation, streamChat, uploadAttachment } from "@/lib/api";
 import { clearSession, fetchMe, getToken } from "@/lib/auth";
 import type {
   AttemptModel,
+  AttachmentOut,
   Mode,
   MessageOut,
   SourceRef,
@@ -29,6 +30,7 @@ function toTurn(m: MessageOut): ChatTurn {
     role: m.role,
     content: m.content,
     reasoning: m.reasoning ?? undefined,
+    attachments: m.attachments ?? [],
     provider: m.provider,
     model: m.model,
   };
@@ -69,9 +71,15 @@ export default function ChatShell({
   const [sourcesPending, setSourcesPending] = useState(false);
   const [mobileSourcesOpen, setMobileSourcesOpen] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  // 当前输入区里的附件草稿（发送前上传完成；OCR 在发送时由后端执行）
+  const [attachment, setAttachment] = useState<PendingAttachment | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const lastQueryRef = useRef<string>("");
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const uploadTokenRef = useRef(0);
+  const lastAttachmentIdsRef = useRef<string[]>([]);
+  const lastAttachmentMetaRef = useRef<AttachmentOut[]>([]);
 
   // ---- 鉴权：没有 token 或 token 失效就回登录页 ----
   useEffect(() => {
@@ -104,18 +112,66 @@ export default function ChatShell({
     router.replace("/login");
   }, [router]);
 
+  const clearAttachment = useCallback(() => {
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+    uploadTokenRef.current += 1;
+    setAttachment(null);
+  }, []);
+
+  /** 选择文件后立即上传（只存储；解析在发送时进行）。 */
+  const handlePickFile = useCallback(async (file: File) => {
+    uploadAbortRef.current?.abort();
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
+    const token = ++uploadTokenRef.current;
+
+    setAttachment({ filename: file.name, size: file.size, status: "uploading" });
+    try {
+      const uploaded = await uploadAttachment(file, controller.signal);
+      if (token !== uploadTokenRef.current) return;
+      setAttachment({
+        id: uploaded.id,
+        filename: uploaded.filename,
+        content_type: uploaded.content_type,
+        size: uploaded.size,
+        status: "ready",
+      });
+    } catch (err) {
+      if (controller.signal.aborted || token !== uploadTokenRef.current) return;
+      setAttachment({
+        filename: file.name,
+        size: file.size,
+        status: "error",
+        error: err instanceof Error ? err.message : "附件上传失败",
+      });
+    } finally {
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+    }
+  }, []);
+
+  const handleRemoveAttachment = useCallback(() => {
+    clearAttachment();
+  }, [clearAttachment]);
+
   const handleNewConversation = useCallback(() => {
     abortRef.current?.abort();
+    clearAttachment();
+    lastAttachmentIdsRef.current = [];
+    lastAttachmentMetaRef.current = [];
     setConversationId(null);
     setTurns([]);
     setSources([]);
     setWebSources([]);
-  }, []);
+  }, [clearAttachment]);
 
   const handleSelectConversation = useCallback(
     async (id: string) => {
       if (id === conversationId) return;
       abortRef.current?.abort();
+      clearAttachment();
+      lastAttachmentIdsRef.current = [];
+      lastAttachmentMetaRef.current = [];
       setLoadingHistory(true);
       try {
         const detail = await getConversation(id);
@@ -134,12 +190,19 @@ export default function ChatShell({
         setLoadingHistory(false);
       }
     },
-    [conversationId],
+    [conversationId, clearAttachment],
   );
 
   const send = useCallback(
-    async (query: string, history: ChatTurn[]) => {
+    async (
+      query: string,
+      history: ChatTurn[],
+      attachmentIds: string[] = [],
+      attachmentMeta: AttachmentOut[] = [],
+    ) => {
       lastQueryRef.current = query;
+      lastAttachmentIdsRef.current = attachmentIds;
+      lastAttachmentMetaRef.current = attachmentMeta;
       const assistantId = nextId();
       const startedIn = conversationId;
 
@@ -148,8 +211,14 @@ export default function ChatShell({
       setSourcesPending(true);
       setTurns((prev) => [
         ...prev,
-        { id: nextId(), role: "user", content: query },
-        { id: assistantId, role: "assistant", content: "", streaming: true },
+        { id: nextId(), role: "user", content: query, attachments: attachmentMeta },
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          streaming: true,
+          preparing: attachmentIds.length > 0,
+        },
       ]);
 
       const controller = new AbortController();
@@ -166,6 +235,7 @@ export default function ChatShell({
             query,
             mode,
             web_search: webSearch,
+            attachment_ids: attachmentIds,
             conversation_id: startedIn,
             history: history
               .filter((t) => !t.error)
@@ -182,7 +252,8 @@ export default function ChatShell({
               setSourcesPending(false);
             },
             onProvider: (e) => {
-              patchTurn(assistantId, { provider: e.provider, model: e.model });
+              // 能走到 provider 事件，说明附件 OCR 已完成
+              patchTurn(assistantId, { provider: e.provider, model: e.model, preparing: false });
             },
             onFallback: (e) => {
               patchTurn(assistantId, { fallbackFrom: e.from });
@@ -208,7 +279,7 @@ export default function ChatShell({
             },
             onToken: (e) => {
               content += e.delta;
-              patchTurn(assistantId, { content });
+              patchTurn(assistantId, { content, preparing: false });
             },
             onError: (e) => {
               patchTurn(assistantId, {
@@ -259,7 +330,9 @@ export default function ChatShell({
         setBusy(false);
         abortRef.current = null;
         setTurns((prev) =>
-          prev.map((t) => (t.id === assistantId ? { ...t, streaming: false } : t)),
+          prev.map((t) =>
+            t.id === assistantId ? { ...t, streaming: false, preparing: false } : t,
+          ),
         );
       }
     },
@@ -267,11 +340,24 @@ export default function ChatShell({
   );
 
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, attachmentIds: string[]) => {
       const history = turns.filter((t) => t.role === "user" || t.content);
-      void send(text, history);
+      const attachmentMeta: AttachmentOut[] =
+        attachment?.status === "ready" && attachment.id
+          ? [
+              {
+                id: attachment.id,
+                filename: attachment.filename,
+                content_type: attachment.content_type ?? "",
+                size: attachment.size,
+              },
+            ]
+          : [];
+      void send(text, history, attachmentIds, attachmentMeta);
+      // 发送后清空输入区 chip；重试仍可通过 lastAttachment*Ref 找回
+      if (attachmentIds.length > 0) setAttachment(null);
     },
-    [send, turns],
+    [send, turns, attachment],
   );
 
   const handleRetry = useCallback(() => {
@@ -279,7 +365,7 @@ export default function ChatShell({
     if (!query) return;
     const history = turns.filter((t) => t.role === "user" && t.content !== query);
     setTurns((prev) => prev.filter((t) => !t.error));
-    void send(query, history);
+    void send(query, history, lastAttachmentIdsRef.current, lastAttachmentMetaRef.current);
   }, [send, turns]);
 
   const handleStop = useCallback(() => {
@@ -331,6 +417,9 @@ export default function ChatShell({
             webSearch={webSearch}
             onWebSearchChange={setWebSearch}
             webSearchAvailable={webSearchAvailable}
+            attachment={attachment}
+            onPickFile={handlePickFile}
+            onRemoveAttachment={handleRemoveAttachment}
           />
         </div>
       </section>

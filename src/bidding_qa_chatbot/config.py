@@ -116,6 +116,34 @@ class Settings(BaseSettings):
     ollama_api_key: SecretStr | None = None
     ollama_model: str = "deepseek-r1:8b"
 
+    # ---------- 附件 OCR（本地 GLM-OCR） ----------
+    # GLM-OCR 走 Ollama **原生** /api/generate（images 为原始 base64），
+    # 与上面的 ollama_base_url（以 /v1 结尾，供文本 provider 使用）刻意分开。
+    ollama_ocr_base_url: str = "http://localhost:11434"
+    ollama_ocr_model: str = "glm-ocr:latest"
+    # 冷启动（首次加载模型）本机实测可达 ~2 分钟，热调用 <1s；10 页 PDF 逐页串行。
+    ollama_ocr_timeout: float = 300.0
+    # 让模型在两次请求之间保持加载，避免每个新用户都重新付出冷加载时间。
+    ollama_ocr_keep_alive: str = "30m"
+    # 模型默认运行时上下文只有 4096，必须显式提高，否则长文档被截断。
+    ollama_ocr_num_ctx: int = 16384
+    ollama_ocr_num_predict: int = 8192
+    # 本地 CPU 推理，串行执行，避免并发把内存打满。
+    ollama_ocr_max_concurrency: int = 1
+
+    # ---------- 附件上传 / 解析 ----------
+    max_upload_bytes: int = 10 * 1024 * 1024
+    # 单个附件的 OCR 文本上限（进入 prompt 前截断）
+    max_attachment_chars: int = 12000
+    # 追问时注入的「最近附件」文本上限
+    max_prior_attachment_chars: int = 4000
+    attachment_pdf_max_pages: int = 10
+    attachment_docx_max_images: int = 5
+    # 追问上下文中注入最近多少个带附件的用户消息
+    attachment_recent_limit: int = 1
+    uploads_dir_name: str = "uploads"
+    uploads_retention_days: int = 7
+
     # ---------- API 服务 ----------
     api_host: str = "0.0.0.0"
     api_port: int = 8001
@@ -226,6 +254,11 @@ class Settings(BaseSettings):
     @property
     def extracted_dir(self) -> Path:
         return self.data_dir / self.extracted_dir_name
+
+    @property
+    def uploads_dir(self) -> Path:
+        """用户上传附件的根目录（data/ 已在 .gitignore 中，且不对外静态服务）。"""
+        return self.data_dir / self.uploads_dir_name
 
     @property
     def images_dir(self) -> Path:

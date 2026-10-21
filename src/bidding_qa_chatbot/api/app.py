@@ -128,6 +128,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.http = build_http_client(settings)
     app.state.qdrant = build_client(settings)
 
+    # ---- 附件上传与本地 OCR ----
+    from bidding_qa_chatbot.attachments import AttachmentStore
+    from bidding_qa_chatbot.llm.ocr import OllamaOCR
+
+    app.state.attachment_store = AttachmentStore(
+        settings.uploads_dir, max_bytes=settings.max_upload_bytes
+    )
+    app.state.ocr = OllamaOCR(settings, app.state.http)
+
     # ---- 关系数据库：账号与对话历史 ----
     from bidding_qa_chatbot.db.session import Database
 
@@ -249,6 +258,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if graph is not None:
             with contextlib.suppress(Exception):
                 await graph.close()
+        with contextlib.suppress(Exception):
+            await app.state.ocr.aclose()
         # provider 关闭失败不该影响进程退出
         with contextlib.suppress(Exception):
             await app.state.chain.aclose()
@@ -276,6 +287,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    from bidding_qa_chatbot.api.routes_attachments import router as attachments_router
     from bidding_qa_chatbot.api.routes_auth import router as auth_router
     from bidding_qa_chatbot.api.routes_chat import router as chat_router
     from bidding_qa_chatbot.api.routes_conversations import router as conversations_router
@@ -286,6 +298,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(conversations_router)
     app.include_router(sources_router)
+    app.include_router(attachments_router)
     app.include_router(chat_router)
     return app
 

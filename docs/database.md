@@ -95,6 +95,7 @@ erDiagram
         text content
         text reasoning
         json sources
+        json attachments
         string provider
         string model
     }
@@ -112,6 +113,11 @@ erDiagram
   做一次子查询。由 `add_message` 一并维护，其值同时就是下一条消息的 `seq`。
 - **`sources` 存成 JSON 而不是关联表。** 引用来源只随消息整体读写，
   从不单独查询，单独建表只增加连接开销。
+- **`attachments` 同样存成 JSON**（迁移 `0005`）。内容是
+  `[{id, filename, content_type, size, kind, ocr_text}]`：对外接口只下发元数据，
+  `ocr_text` 仅服务端用于同会话追问。该列使用 `none_as_null=True`，
+  让 Python `None` 写成 SQL NULL——否则 `attachments IS NOT NULL` 会把每条无附件
+  消息也当成有值，追问注入的 limit 会被空消息挤占。
 - **类型刻意可移植**（`sa.Uuid`、`sa.JSON().with_variant(JSONB, "postgresql")`）：
   Postgres 上得到原生 `uuid` 与 JSONB，SQLite 上退化为可用的等价物。
   这样 CI 与本地无 Postgres 时也能跑完整测试。

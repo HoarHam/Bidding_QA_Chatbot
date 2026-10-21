@@ -25,6 +25,8 @@ class ChatRequest(BaseModel):
     mode: Mode = "fast"
     #: 用户是否在本轮开启联网搜索（前端开关）。仅当服务端也启用时才真正生效。
     web_search: bool = False
+    #: 本轮携带的附件 id（先经 POST /api/attachments 上传）。当前只支持单个附件。
+    attachment_ids: list[str] = Field(default_factory=list, max_length=1)
     top_k: int | None = Field(default=None, ge=1, le=50)
     # 只带最近若干轮作为上下文；完整历史在服务端按 conversation_id 落库。
     history: list[ChatMessage] = Field(default_factory=list, max_length=12)
@@ -242,6 +244,19 @@ class TokenResponse(BaseModel):
 
 
 # ---------------------------------------------------------------- 对话历史
+class AttachmentOut(BaseModel):
+    """附件元数据（不下发 OCR 文本）。
+
+    上传接口与历史消息共用这一形状；`messages.attachments` 里还存有
+    `kind` / `ocr_text` 等服务端字段，读取时由本模型过滤掉。
+    """
+
+    id: str
+    filename: str
+    content_type: str
+    size: int
+
+
 class MessageOut(BaseModel):
     id: str
     role: Literal["user", "assistant"]
@@ -251,6 +266,8 @@ class MessageOut(BaseModel):
     #: 联网搜索来源。落库时与本地来源同存于 messages.sources（带 kind="web" 标记），
     #: 读取时在这里分流，旧数据（无标记）仍按本地来源解析。
     web_sources: list[WebSource] = Field(default_factory=list)
+    #: 用户消息携带的附件元数据（OCR 文本只在服务端）。
+    attachments: list[AttachmentOut] = Field(default_factory=list)
     provider: str | None = None
     model: str | None = None
     created_at: datetime

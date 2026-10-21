@@ -109,3 +109,21 @@ LLM_FALLBACK_CHAIN=deepseek,zhipu,ollama,vllm
 ```
 
 CPU 上跑 8B 模型很慢（个位数 token/秒），但可用。
+
+## 本地 OCR（GLM-OCR）
+
+附件解析使用独立的本地模型 `glm-ocr:latest`，**不走 ProviderChain**（它不是文本
+provider 的兜底候选，冷启动可达 ~2 分钟 也远超首 token 超时）：
+
+```
+OLLAMA_OCR_BASE_URL=http://localhost:11434   # 原生 API，不带 /v1
+OLLAMA_OCR_MODEL=glm-ocr:latest
+OLLAMA_OCR_TIMEOUT=180
+OLLAMA_OCR_NUM_CTX=16384                      # 模型运行时默认只有 4096
+OLLAMA_OCR_NUM_PREDICT=8192
+OLLAMA_OCR_MAX_CONCURRENCY=1
+```
+
+请求走原生 `POST /api/generate`（`prompt="Text Recognition:"` + 原始 base64 `images`，
+`stream=false`）。注意 `OLLAMA_BASE_URL` 以 `/v1` 结尾，那是给 OpenAI 兼容文本 provider
+用的，两者不要混用。
