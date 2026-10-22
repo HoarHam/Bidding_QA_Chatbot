@@ -45,6 +45,10 @@ from bidding_qa_chatbot.llm.base import (
     ToolCall,
     Usage,
 )
+from bidding_qa_chatbot.llm.tool_markup import (
+    ZhipuToolCallFilter,
+    strip_zhipu_tool_calls,
+)
 from bidding_qa_chatbot.schemas import DepHealth
 
 logger = logging.getLogger(__name__)
@@ -156,6 +160,10 @@ class ZhipuProvider:
         finish_reason = "stop"
         tool_buffer: dict[int, dict[str, str]] = {}
         reasoning_parts: list[str] = []
+        # GLM 可能把工具调用以 <tool_call> 文本标记混在正文/思维内容里
+        content_filter = ZhipuToolCallFilter()
+        reasoning_filter = ZhipuToolCallFilter()
+        markup_calls: list[ToolCall] = []
 
         try:
             while True:
@@ -182,13 +190,19 @@ class ZhipuProvider:
                 if delta is not None:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
-                        reasoning_parts.append(reasoning)
-                        emitted += 1
-                        yield StreamEvent(kind="reasoning", text=reasoning)
+                        visible, calls = reasoning_filter.feed(reasoning)
+                        markup_calls.extend(calls)
+                        if visible:
+                            reasoning_parts.append(visible)
+                            emitted += 1
+                            yield StreamEvent(kind="reasoning", text=visible)
                     content = getattr(delta, "content", None)
                     if content:
-                        emitted += 1
-                        yield StreamEvent(kind="content", text=content)
+                        visible, calls = content_filter.feed(content)
+                        markup_calls.extend(calls)
+                        if visible:
+                            emitted += 1
+                            yield StreamEvent(kind="content", text=visible)
 
                     for tc in getattr(delta, "tool_calls", None) or []:
                         idx = getattr(tc, "index", 0) or 0
@@ -208,16 +222,37 @@ class ZhipuProvider:
             # 让工作线程自行退出；不 join，避免阻塞事件循环。
             cancel.set()
 
+        # 冲刷过滤器里暂存的尾部（可能包含跨 chunk 拆分的标记）
+        tail_reasoning, calls = reasoning_filter.finish()
+        markup_calls.extend(calls)
+        if tail_reasoning:
+            reasoning_parts.append(tail_reasoning)
+            emitted += 1
+            yield StreamEvent(kind="reasoning", text=tail_reasoning)
+
+        tail_content, calls = content_filter.finish()
+        markup_calls.extend(calls)
+        if tail_content:
+            emitted += 1
+            yield StreamEvent(kind="content", text=tail_content)
+
         yield StreamEnd(
             finish_reason=finish_reason,
             usage=usage,
             provider=self.name,
             model=self.model_for(req.mode),
-            tool_calls=[
-                ToolCall(id=e["id"] or f"call_{i}", name=e["name"], arguments=e["arguments"])
-                for i, e in sorted(tool_buffer.items())
-                if e["name"]
-            ],
+            tool_calls=_dedupe_tool_calls(
+                [
+                    ToolCall(
+                        id=e["id"] or f"call_{i}",
+                        name=e["name"],
+                        arguments=e["arguments"],
+                    )
+                    for i, e in sorted(tool_buffer.items())
+                    if e["name"]
+                ]
+                + markup_calls
+            ),
             reasoning="".join(reasoning_parts) or None,
         )
 
@@ -243,8 +278,9 @@ class ZhipuProvider:
                     )
                 )
             return LLMResult(
-                text=getattr(message, "content", "") or "",
-                reasoning=getattr(message, "reasoning_content", None),
+                # 非流式响应也可能夹带工具调用标记：至少保证不下发原始标记
+                text=strip_zhipu_tool_calls(getattr(message, "content", "") or ""),
+                reasoning=strip_zhipu_tool_calls(getattr(message, "reasoning_content", None)),
                 finish_reason=getattr(choice, "finish_reason", "stop") or "stop",
                 usage=_to_usage(getattr(resp, "usage", None)),
                 provider=self.name,
@@ -291,3 +327,16 @@ def _to_usage(raw: Any) -> Usage | None:
         completion_tokens=getattr(raw, "completion_tokens", None),
         total_tokens=getattr(raw, "total_tokens", None),
     )
+
+
+def _dedupe_tool_calls(calls: list[ToolCall]) -> list[ToolCall]:
+    """结构化 tool_calls 与文本标记还原结果可能重复，按 (name, arguments) 去重。"""
+    seen: set[tuple[str, str]] = set()
+    unique: list[ToolCall] = []
+    for call in calls:
+        key = (call.name, call.arguments)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(call)
+    return unique

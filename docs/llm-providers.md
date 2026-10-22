@@ -110,6 +110,40 @@ LLM_FALLBACK_CHAIN=deepseek,zhipu,ollama,vllm
 
 CPU 上跑 8B 模型很慢（个位数 token/秒），但可用。
 
+## DeepSeek DSML 标记（工具调用泄露）
+
+DeepSeek 在部分场景（尤其 thinking 模式、长上下文、缺少外层包裹）会把工具调用以
+DSML 标记**当正文或思维内容**流式返回，例如：
+
+```
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="query_bidding_graph">
+<｜｜DSML｜｜ parameter name="cypher" string="true">MATCH ...</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
+```
+
+`llm/dsml.py` 的流式过滤器负责：跨 chunk 暂存可能的标记片段（绝不外泄半个标记）、
+识别单/双全角竖线与 ASCII 变体、把 invoke/parameter 还原成真正的 `ToolCall`
+（`string="false"` 的参数按 JSON 解析）、丢弃未闭合残片。`openai_compat.astream`
+对 **content 与 reasoning 两个通道**都启用了过滤；非流式响应也会 `strip_dsml`。
+不要绕过它：绕过既会把内部标记展示给用户，也会让工具调用静默丢失。
+
+### 智谱 GLM 的文本工具调用标记
+
+从 DeepSeek 回退到智谱（尤其 thinking 模式）时，GLM 也可能把工具调用当正文返回，
+但方言不同：
+
+```
+<tool_call>search_bidding_knowledge<arg_key>query</arg_key>
+<arg_value>2023年 采购人 交易</arg_value></tool_call>
+```
+
+`llm/tool_markup.py` 的 `ZhipuToolCallFilter` 对 content 与 reasoning 两个通道做同样的
+跨 chunk 过滤，把 `<tool_call>` + 多组 `<arg_key>/<arg_value>` 还原成真正的 `ToolCall`
+（值尝试 JSON 解析），未闭合残片直接丢弃；`zhipu.py` 的 `acomplete` 也会 `strip`。
+两个 provider 的方言各自独立，不能互相替代。
+
 ## 本地 OCR（GLM-OCR）
 
 附件解析使用独立的本地模型 `glm-ocr:latest`，**不走 ProviderChain**（它不是文本

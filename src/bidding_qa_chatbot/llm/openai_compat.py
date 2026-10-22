@@ -35,6 +35,7 @@ from bidding_qa_chatbot.llm.base import (
     ToolCall,
     Usage,
 )
+from bidding_qa_chatbot.llm.dsml import DSMLStreamFilter, strip_dsml
 from bidding_qa_chatbot.schemas import DepHealth
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,11 @@ class OpenAICompatProvider:
         # tool_call 的分片是分批到达的：id 与 name 通常一次给全，arguments 是逐段拼的。
         tool_buffer: dict[int, dict[str, str]] = {}
         reasoning_parts: list[str] = []
+        # DeepSeek 可能把工具调用以 DSML 标记混在正文/思维内容里流式返回。
+        # 过滤器负责不外泄标记，并把可识别的调用还原成 ToolCall。
+        content_filter = DSMLStreamFilter()
+        reasoning_filter = DSMLStreamFilter()
+        dsml_calls: list[ToolCall] = []
 
         try:
             async for chunk in stream:
@@ -168,13 +174,19 @@ class OpenAICompatProvider:
                 # reasoning_content 不在类型签名里，只能 getattr 取。
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
-                    reasoning_parts.append(reasoning)
-                    emitted += 1
-                    yield StreamEvent(kind="reasoning", text=reasoning)
+                    visible, calls = reasoning_filter.feed(reasoning)
+                    dsml_calls.extend(calls)
+                    if visible:
+                        reasoning_parts.append(visible)
+                        emitted += 1
+                        yield StreamEvent(kind="reasoning", text=visible)
 
                 if delta.content:
-                    emitted += 1
-                    yield StreamEvent(kind="content", text=delta.content)
+                    visible, calls = content_filter.feed(delta.content)
+                    dsml_calls.extend(calls)
+                    if visible:
+                        emitted += 1
+                        yield StreamEvent(kind="content", text=visible)
 
                 for tc in getattr(delta, "tool_calls", None) or []:
                     idx = getattr(tc, "index", 0) or 0
@@ -201,16 +213,37 @@ class OpenAICompatProvider:
             with contextlib.suppress(Exception):
                 await stream.close()
 
+        # 冲刷过滤器里暂存的尾部（可能包含跨 chunk 拆分的标记）
+        tail_reasoning, calls = reasoning_filter.finish()
+        dsml_calls.extend(calls)
+        if tail_reasoning:
+            reasoning_parts.append(tail_reasoning)
+            emitted += 1
+            yield StreamEvent(kind="reasoning", text=tail_reasoning)
+
+        tail_content, calls = content_filter.finish()
+        dsml_calls.extend(calls)
+        if tail_content:
+            emitted += 1
+            yield StreamEvent(kind="content", text=tail_content)
+
         yield StreamEnd(
             finish_reason=finish_reason,
             usage=usage,
             provider=self.name,
             model=self.model_for(req.mode),
-            tool_calls=[
-                ToolCall(id=e["id"] or f"call_{i}", name=e["name"], arguments=e["arguments"])
-                for i, e in sorted(tool_buffer.items())
-                if e["name"]
-            ],
+            tool_calls=_dedupe_tool_calls(
+                [
+                    ToolCall(
+                        id=e["id"] or f"call_{i}",
+                        name=e["name"],
+                        arguments=e["arguments"],
+                    )
+                    for i, e in sorted(tool_buffer.items())
+                    if e["name"]
+                ]
+                + dsml_calls
+            ),
             reasoning="".join(reasoning_parts) or None,
         )
 
@@ -225,8 +258,9 @@ class OpenAICompatProvider:
         choice = resp.choices[0]
         message = choice.message
         return LLMResult(
-            text=message.content or "",
-            reasoning=getattr(message, "reasoning_content", None),
+            # 非流式响应也可能夹带 DSML 标记：至少保证不下发原始标记
+            text=strip_dsml(message.content or ""),
+            reasoning=strip_dsml(getattr(message, "reasoning_content", None)),
             finish_reason=choice.finish_reason or "stop",
             usage=_to_usage(getattr(resp, "usage", None)),
             provider=self.name,
@@ -267,6 +301,19 @@ class OpenAICompatProvider:
             with contextlib.suppress(Exception):
                 await self._client.close()
             self._client = None
+
+
+def _dedupe_tool_calls(calls: list[ToolCall]) -> list[ToolCall]:
+    """结构化 tool_calls 与 DSML 还原结果可能重复，按 (name, arguments) 去重。"""
+    seen: set[tuple[str, str]] = set()
+    unique: list[ToolCall] = []
+    for call in calls:
+        key = (call.name, call.arguments)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(call)
+    return unique
 
 
 def _extract_tool_calls(message: Any) -> list[ToolCall]:

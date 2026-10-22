@@ -236,3 +236,105 @@ async def test_vllm_provider_hits_configured_base_url():
     events, _ = await _drain(provider, LLMRequest(messages=[ChatMessage("user", "问")]))
     assert route.called
     assert [e.text for e in events] == ["本地"]
+
+
+# ---------------------------------------------------------------- DSML 容错
+DSML_TOOL_BLOCK = (
+    "<｜｜DSML｜｜ calls>\n"
+    '<｜｜DSML｜｜ invoke name="query_bidding_graph">\n'
+    '<｜｜DSML｜｜ parameter name="cypher" string="true">MATCH (n) RETURN n</｜｜DSML｜｜ parameter>\n'
+    "</｜｜DSML｜｜ invoke>\n"
+    "</｜｜DSML｜｜ calls>"
+)
+
+
+@respx.mock
+async def test_dsml_tool_call_is_hidden_and_recovered_across_chunks():
+    """标记跨 chunk 拆分时不能泄露，且要还原成真正的 ToolCall。"""
+    chunks = [
+        DSML_TOOL_BLOCK[:18],
+        DSML_TOOL_BLOCK[18:70],
+        DSML_TOOL_BLOCK[70:130],
+        DSML_TOOL_BLOCK[130:],
+    ]
+    body = _sse(*[_chunk({"content": c}) for c in chunks], _chunk({}, "stop"))
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    events, end = await _drain(_provider(), LLMRequest(messages=[]))
+
+    visible = "".join(e.text for e in events if e.kind == "content")
+    assert "DSML" not in visible and "｜" not in visible
+    assert end.tool_calls and end.tool_calls[0].name == "query_bidding_graph"
+    assert json.loads(end.tool_calls[0].arguments)["cypher"] == "MATCH (n) RETURN n"
+
+
+@respx.mock
+async def test_dsml_markers_in_reasoning_are_filtered_and_recovered():
+    body = _sse(
+        _chunk({"reasoning_content": DSML_TOOL_BLOCK}),
+        _chunk({"content": "继续回答"}),
+        _chunk({}, "stop"),
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    events, end = await _drain(_provider(), LLMRequest(messages=[]))
+
+    reasoning = "".join(e.text for e in events if e.kind == "reasoning")
+    content = "".join(e.text for e in events if e.kind == "content")
+    assert "DSML" not in reasoning and "｜" not in reasoning
+    assert content == "继续回答"
+    assert end.tool_calls and end.tool_calls[0].name == "query_bidding_graph"
+
+
+@respx.mock
+async def test_dsml_without_opener_is_recovered():
+    body = _sse(
+        _chunk(
+            {
+                "content": '前缀<｜DSML｜invoke name="search_bidding_knowledge">'
+                '<｜DSML｜parameter name="query" string="true">保证金</｜DSML｜parameter>'
+                "</｜DSML｜invoke>后缀"
+            }
+        ),
+        _chunk({}, "stop"),
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    events, end = await _drain(_provider(), LLMRequest(messages=[]))
+
+    visible = "".join(e.text for e in events if e.kind == "content")
+    assert "DSML" not in visible
+    assert "前缀" in visible and "后缀" in visible
+    assert end.tool_calls and end.tool_calls[0].name == "search_bidding_knowledge"
+    assert json.loads(end.tool_calls[0].arguments)["query"] == "保证金"
+
+
+@respx.mock
+async def test_unclosed_dsml_fragment_never_leaks():
+    body = _sse(
+        _chunk({"content": '正常回答<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="x">'}),
+        _chunk({}, "stop"),
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    events, end = await _drain(_provider(), LLMRequest(messages=[]))
+
+    visible = "".join(e.text for e in events if e.kind == "content")
+    assert visible == "正常回答"
+    assert end.tool_calls == []
