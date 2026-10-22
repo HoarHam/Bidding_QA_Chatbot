@@ -983,3 +983,43 @@ async def test_timings_are_persisted_and_returned_in_history(client_factory):
         detail = (await client.get(f"/api/conversations/{done['conversation_id']}")).json()
         assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
         assert assistant["timings"] == timings, "历史回载应返回同一份用时"
+
+
+async def test_history_summary_injected_into_stream_prompt(client_factory):
+    from types import SimpleNamespace
+
+    from bidding_qa_chatbot.db import repository as repo
+
+    summary_result = SimpleNamespace(
+        text="早前聊过投标保证金退还。",
+        reasoning=None,
+        provider="fake",
+        model="fake-model",
+        finish_reason="stop",
+        usage=None,
+    )
+    chain = FakeChain(complete_result=summary_result)
+    client = await client_factory(chain)
+
+    async with client:
+        me = (await client.get("/api/auth/me")).json()
+        async with client.app.state.db.session() as session:
+            conversation = await repo.create_conversation(session, user_id=uuid.UUID(me["id"]))
+            for index in range(14):
+                await repo.add_message(
+                    session,
+                    conversation=conversation,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"历史消息{index + 1}",
+                )
+            conversation_id = conversation.id
+
+        resp = await client.post(
+            "/api/chat/stream",
+            json={"query": "继续", "conversation_id": str(conversation_id)},
+        )
+        assert resp.status_code == 200
+
+        # 第一次 complete 是摘要；随后的 stream_with_fallback 才是回答请求
+        stream_request = chain.requests[1]
+        assert "早前聊过投标保证金退还" in stream_request.messages[0].content

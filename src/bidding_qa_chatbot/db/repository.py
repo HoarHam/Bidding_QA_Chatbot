@@ -238,6 +238,25 @@ async def list_messages(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def update_conversation_summary(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    summary: str,
+    upto_seq: int,
+) -> bool:
+    """保存会话摘要及其覆盖到的消息序号（用户隔离）。"""
+    conversation = await get_conversation(session, user_id=user_id, conversation_id=conversation_id)
+    if conversation is None:
+        return False
+    conversation.summary = summary
+    conversation.summary_upto_seq = upto_seq
+    conversation.summary_updated_at = datetime.now(UTC)
+    await session.flush()
+    return True
+
+
 async def get_message(
     session: AsyncSession, *, user_id: uuid.UUID, message_id: uuid.UUID
 ) -> Message | None:

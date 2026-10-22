@@ -38,6 +38,7 @@ from bidding_qa_chatbot.config import Settings
 from bidding_qa_chatbot.db import repository as repo
 from bidding_qa_chatbot.llm.base import AllProvidersFailed, LLMRequest, MidStreamError, StreamEnd
 from bidding_qa_chatbot.llm.base import StreamEvent as LLMStreamEvent
+from bidding_qa_chatbot.llm.history_summary import ensure_history_summary
 from bidding_qa_chatbot.llm.prompts import NO_CONTEXT_REPLY, build_context, build_messages
 from bidding_qa_chatbot.log import redact
 from bidding_qa_chatbot.schemas import (
@@ -378,6 +379,15 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
         persist_user_message=regenerate_id is None,
     )
 
+    # 历史摘要：消息超过保留窗口时先压缩更早内容（等待完成，前端不可见；失败不阻塞）
+    history_summary = await ensure_history_summary(
+        chain=chain,
+        db=request.app.state.db,
+        settings=settings,
+        user_id=user.id,
+        conversation_id=uuid.UUID(conversation_id),
+    )
+
     agent = getattr(request.app.state, "agent", None)
     use_agent = bool(settings.agent_enabled and agent is not None)
 
@@ -405,6 +415,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                 web_search_enabled=web_enabled,
                 attachment_text=attachment_ctx.current_text,
                 prior_attachment_text=attachment_ctx.prior_text,
+                history_summary=history_summary,
             ),
             body.mode,
             allowed_tools=allowed_tools,
@@ -429,6 +440,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
             body.history,
             attachment_text=attachment_ctx.current_text,
             prior_attachment_text=attachment_ctx.prior_text,
+            history_summary=history_summary,
         )
         source_iter = chain.stream_with_fallback(LLMRequest(messages=messages, mode=body.mode))
 
@@ -817,6 +829,14 @@ async def chat(
         request, user, body, attachments=attachment_ctx.persisted or None
     )
 
+    history_summary = await ensure_history_summary(
+        chain=chain,
+        db=request.app.state.db,
+        settings=settings,
+        user_id=user.id,
+        conversation_id=uuid.UUID(conversation_id),
+    )
+
     try:
         result = await _retrieve(request, body)
     except HTTPException:
@@ -834,6 +854,7 @@ async def chat(
         body.history,
         attachment_text=attachment_ctx.current_text,
         prior_attachment_text=attachment_ctx.prior_text,
+        history_summary=history_summary,
     )
     sources = [s.to_ref() for s in result.sources]
 

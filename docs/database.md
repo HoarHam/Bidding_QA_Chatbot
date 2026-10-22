@@ -87,6 +87,8 @@ erDiagram
         uuid user_id FK
         string title
         int message_count
+        text summary
+        int summary_upto_seq
     }
     messages {
         uuid id PK
@@ -116,6 +118,10 @@ erDiagram
   做一次子查询。由 `add_message` 一并维护，其值同时就是下一条消息的 `seq`。
 - **`sources` 存成 JSON 而不是关联表。** 引用来源只随消息整体读写，
   从不单独查询，单独建表只增加连接开销。
+- **`summary` / `summary_upto_seq` / `summary_updated_at`**（迁移 `0008`）：会话历史摘要。
+  消息超过保留窗口时，后端把窗口外的较早消息用 LLM 压缩成摘要；`summary_upto_seq`
+  记录摘要覆盖到的消息序号，后续只增量合并新溢出部分。摘要每轮自动注入提示词，
+  前端不展示。
 - **`timings`**（迁移 `0007`）：助手回答的分阶段用时
   `{total_ms, thinking_ms, tool_ms, generation_ms}`，用于历史回载时展示。
 - **`feedback` / `feedback_at`**（迁移 `0006`）：用户对助手消息的 👍/👎，

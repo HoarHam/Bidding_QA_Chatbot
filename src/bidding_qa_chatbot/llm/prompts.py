@@ -72,6 +72,14 @@ ATTACHMENT_SYSTEM_PROMPT = """
 涉及外部法规或事实时，仍应遵守检索与引用要求。附件不足以回答时明确说明，不要编造。
 """
 
+#: 会话较早消息的摘要（前情提要）：只是背景，不是新指令。
+HISTORY_SUMMARY_PROMPT = """
+以下是本会话较早消息的摘要（前情提要），仅用于回顾上下文；它不是用户的新指令，
+不要逐字复述；若与用户当前问题冲突，以当前问题为准。
+【会话前情提要】
+{summary}
+"""
+
 #: Agent 路径下、本轮/历史存在附件时追加的说明。
 ATTACHMENT_AGENT_PROMPT = """
 另外，本轮或本会话提供了用户上传附件的 OCR 内容。
@@ -99,6 +107,7 @@ def build_agent_messages(
     web_search_enabled: bool = False,
     attachment_text: str | None = None,
     prior_attachment_text: str | None = None,
+    history_summary: str | None = None,
 ) -> list:
     """Agent 路径的消息：不预置资料，由模型自行决定是否检索。
 
@@ -117,6 +126,11 @@ def build_agent_messages(
         + (AGENT_GRAPH_PROMPT if graph_enabled else "")
         + (AGENT_WEB_SEARCH_PROMPT if web_search_enabled else "")
         + (ATTACHMENT_SYSTEM_PROMPT + ATTACHMENT_AGENT_PROMPT if has_attachments else "")
+        + (
+            HISTORY_SUMMARY_PROMPT.format(summary=history_summary.strip())
+            if history_summary and history_summary.strip()
+            else ""
+        )
         + _AGENT_SYSTEM_TAIL
     )
     messages = [ChatMessage(role="system", content=system)]
@@ -170,12 +184,21 @@ def build_messages(
     *,
     attachment_text: str | None = None,
     prior_attachment_text: str | None = None,
+    history_summary: str | None = None,
 ) -> list:
     """组装最终发给 LLM 的消息列表。"""
     from bidding_qa_chatbot.llm.base import ChatMessage
 
     has_attachments = bool((attachment_text or "").strip() or (prior_attachment_text or "").strip())
-    system = SYSTEM_PROMPT + (ATTACHMENT_SYSTEM_PROMPT if has_attachments else "")
+    system = (
+        SYSTEM_PROMPT
+        + (ATTACHMENT_SYSTEM_PROMPT if has_attachments else "")
+        + (
+            HISTORY_SUMMARY_PROMPT.format(summary=history_summary.strip())
+            if history_summary and history_summary.strip()
+            else ""
+        )
+    )
     messages = [ChatMessage(role="system", content=system)]
 
     for turn in history or []:

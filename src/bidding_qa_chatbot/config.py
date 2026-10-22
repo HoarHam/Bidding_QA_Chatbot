@@ -72,6 +72,15 @@ class Settings(BaseSettings):
     # 避免模型反复检索、用户什么都拿不到。
     agent_max_steps: int = 3
 
+    # ---------- 历史消息自动摘要（前情提要） ----------
+    # 只保留最近 N 条消息原文；更早的消息压缩成摘要注入后续轮次。
+    history_window_messages: int = 12
+    # 摘要本身的最大长度与生成摘要时的输入上限（字符）
+    history_summary_max_chars: int = 2000
+    history_summary_input_max_chars: int = 12000
+    # 摘要调用超时（秒）；超时/失败时跳过摘要，不阻塞对话。
+    history_summary_timeout: float = 60.0
+
     # ---------- Qdrant (需求 8) ----------
     qdrant_url: str | None = None
     qdrant_api_key: SecretStr | None = None

@@ -73,6 +73,13 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(sa.String(120), default="新对话")
     # 冗余计数：会话列表要显示条数，不这样就得对每条会话做一次子查询
     message_count: Mapped[int] = mapped_column(sa.Integer, default=0, server_default="0")
+    #: 超出历史保留窗口的消息的 LLM 摘要（前情提要），供后续轮次回顾。
+    summary: Mapped[str | None] = mapped_column(sa.Text, default=None)
+    #: 摘要覆盖到的消息 seq（1-based，含）；0 表示尚未生成。
+    summary_upto_seq: Mapped[int] = mapped_column(sa.Integer, default=0, server_default="0")
+    summary_updated_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), default=_utcnow, server_default=sa.func.now()
     )
