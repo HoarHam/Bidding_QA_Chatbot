@@ -213,3 +213,17 @@ def test_timings_are_mirrored_from_wire_format():
     assert "toTurnTimings" in shell
     assert "e.timings" in shell
     assert "m.timings" in shell
+
+
+def test_message_list_respects_manual_scroll_up_during_streaming():
+    """流式渲染不能强制把用户拉回底部。
+
+    回归守卫：曾经每个 token 都调 scrollIntoView({behavior:"smooth"})，
+    平滑动画的中间位置会反复把「离底部距离」判定为很小，覆盖用户的向上滚动，
+    表现为向上滚动后无法停留。
+    """
+    source = (FRONTEND / "components" / "MessageList.tsx").read_text(encoding="utf-8")
+    assert "scrollIntoView(" not in source, "不要用 scrollIntoView + smooth 跟随流式内容"
+    assert "stickToBottomRef" in source, "应使用同步 ref 记录是否跟随底部"
+    assert "onWheel" in source, "向上滚轮应能立即停止跟随"
+    assert "el.scrollTop = el.scrollHeight" in source
