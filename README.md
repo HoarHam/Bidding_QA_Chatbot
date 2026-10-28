@@ -21,6 +21,11 @@ GLM-OCR 解析（PDF 逐页渲染、DOCX 提取正文与内嵌图片），解析
 👍/👎 写入数据库，用于后续分析并优化检索与生成策略。回答完成后还会显示分阶段用时
 （总用时 / 思考 / 工具执行 / 生成回答，单位秒）。
 
+**可观测性（Langfuse）**：每一轮问答都会生成一条 trace，覆盖 Agent 的每一步、
+每次 LLM 生成与每次工具调用；👍/👎 会作为 score 写回产生该回答的 trace。
+未配置密钥或 Langfuse 不可用时静默降级，不影响问答；可通过
+`LANGFUSE_CAPTURE_CONTENT=false` 关闭正文上报。详见 `docs/observability.md`。
+
 **四个工具，按问题类型自动路由**：
 
 - `search_bidding_knowledge`——法规条款、期限、门槛、资格条件等规范性知识（检索 + 标注出处）；
@@ -154,7 +159,7 @@ flowchart LR
 | 附件解析 | 本地 Ollama `glm-ocr:latest`（原生 `/api/generate`）；PDF 用 PyMuPDF 渲染、DOCX 用 python-docx |
 | 文档渲染 | react-markdown + remark-gfm（含 GFM 表格） |
 
-更详细的说明见 `docs/`：架构、入库、检索、API、前端、开发、部署。
+更详细的说明见 `docs/`：架构、入库、检索、API、前端、开发、部署、可观测性。
 
 ## 协作者
 

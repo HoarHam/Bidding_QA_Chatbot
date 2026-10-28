@@ -70,5 +70,15 @@ def setup_logging(level: str = "INFO") -> None:
     root.setLevel(level)
 
     # 这几个库在 INFO 级别非常吵，且可能带出请求头。
-    for noisy in ("httpx", "httpcore", "urllib3", "qdrant_client", "sentence_transformers"):
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "qdrant_client",
+        "sentence_transformers",
+        # Langfuse/OTel 在追踪端点不可达时会按批次重试并打 INFO/ERROR；降级到
+        # WARNING，避免把真正的业务日志淹掉。上报失败我们自己也会限频记录。
+        "langfuse",
+        "opentelemetry",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)

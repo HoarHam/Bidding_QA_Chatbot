@@ -19,6 +19,7 @@ from bidding_qa_chatbot.db import repository as repo
 from bidding_qa_chatbot.db.models import Message
 from bidding_qa_chatbot.llm.base import ChatMessage, LLMRequest
 from bidding_qa_chatbot.log import redact
+from bidding_qa_chatbot.observability import TraceHandle, messages_payload, usage_payload
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +37,21 @@ async def ensure_history_summary(
     settings: Settings,
     user_id: uuid.UUID,
     conversation_id: uuid.UUID,
+    trace: TraceHandle | None = None,
 ) -> str | None:
-    """按需生成/更新会话摘要，返回当前可注入的摘要（失败时返回旧摘要或 None）。"""
+    """按需生成/更新会话摘要，返回当前可注入的摘要（失败时返回旧摘要或 None）。
+
+    `trace` 是当前问答的 Langfuse 句柄；摘要用的 LLM 调用会作为它的
+    generation 子节点被观测到。
+    """
     try:
-        return await _ensure(chain, db, settings, user_id, conversation_id)
+        return await _ensure(chain, db, settings, user_id, conversation_id, trace)
     except Exception as exc:  # noqa: BLE001 — 摘要失败不能拖垮对话
         logger.warning("生成会话摘要失败（本轮跳过）: %s", redact(str(exc))[:200])
         return None
 
 
-async def _ensure(chain, db, settings, user_id, conversation_id) -> str | None:
+async def _ensure(chain, db, settings, user_id, conversation_id, trace=None) -> str | None:
     async with db.session() as session:
         conversation = await repo.get_conversation(
             session, user_id=user_id, conversation_id=conversation_id
@@ -84,10 +90,25 @@ async def _ensure(chain, db, settings, user_id, conversation_id) -> str | None:
         ],
         mode="fast",
     )
-    result = await asyncio.wait_for(
-        chain.complete(request), timeout=settings.history_summary_timeout
+    generation = (trace or TraceHandle.noop()).start_generation(
+        "history.summary",
+        input={"messages": messages_payload(request.messages)},
+        metadata={"timeout_s": settings.history_summary_timeout},
     )
+    try:
+        result = await asyncio.wait_for(
+            chain.complete(request), timeout=settings.history_summary_timeout
+        )
+    except Exception as exc:  # noqa: BLE001 — 记到 trace 后再交给外层降级
+        generation.end(level="ERROR", status_message=str(exc))
+        raise
     summary = (getattr(result, "text", "") or "").strip()
+    generation.end(
+        output={"summary": summary},
+        model=getattr(result, "model", None),
+        usage_details=usage_payload(getattr(result, "usage", None)),
+        metadata={"provider": getattr(result, "provider", None)},
+    )
     if not summary:
         return prior_summary or None
     if len(summary) > settings.history_summary_max_chars:

@@ -128,6 +128,9 @@ class Message(Base):
     feedback_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), default=None)
     #: 分阶段用时（{total_ms, thinking_ms, tool_ms, generation_ms}），历史回载时展示。
     timings: Mapped[dict | None] = mapped_column(JSONType, default=None)
+    #: 本轮回答对应的 Langfuse trace id（32 位十六进制）。用户反馈据此打到原 trace 上；
+    #: 未启用可观测性或采样丢弃时为 NULL，反馈照常落库、只是没有外部分数。
+    trace_id: Mapped[str | None] = mapped_column(sa.String(64), default=None)
     provider: Mapped[str | None] = mapped_column(sa.String(32), default=None)
     model: Mapped[str | None] = mapped_column(sa.String(128), default=None)
     created_at: Mapped[datetime] = mapped_column(

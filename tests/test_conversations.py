@@ -369,6 +369,39 @@ async def test_recent_user_attachments_is_scoped_and_newest_first(db):
         )
 
 
+async def test_trace_id_is_persisted_and_replaced_on_regenerate(db):
+    user = await _make_user(db, "trace_a")
+    async with db.session() as session:
+        conv = await repo.create_conversation(session, user_id=user.id)
+        await repo.add_message(session, conversation=conv, role="user", content="q")
+        assistant = await repo.add_message(
+            session,
+            conversation=conv,
+            role="assistant",
+            content="a",
+            trace_id="a" * 32,
+        )
+        message_id = assistant.id
+
+    async with db.session() as session:
+        message = await repo.get_message(session, user_id=user.id, message_id=message_id)
+        assert message is not None and message.trace_id == "a" * 32
+
+    async with db.session() as session:
+        assert await repo.update_assistant_message(
+            session,
+            user_id=user.id,
+            message_id=message_id,
+            content="新回答",
+            reasoning=None,
+            sources=[],
+            trace_id="b" * 32,
+        )
+    async with db.session() as session:
+        message = await repo.get_message(session, user_id=user.id, message_id=message_id)
+        assert message is not None and message.trace_id == "b" * 32
+
+
 async def test_message_feedback_is_user_scoped_and_regenerate_clears_it(db):
     user1 = await _make_user(db, "fb_a")
     user2 = await _make_user(db, "fb_b")

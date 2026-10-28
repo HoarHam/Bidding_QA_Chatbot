@@ -205,6 +205,32 @@ async def _probe_tavily(settings: Settings) -> DepHealth:
     return DepHealth(name="tavily", status="ok", message="已配置（不做付费探活）")
 
 
+async def _probe_langfuse(settings: Settings) -> DepHealth:
+    """Langfuse 只做配置级探测：追踪是旁路，不能因为控制台网络抖动把服务标成不健康。"""
+    if not settings.langfuse_enabled:
+        return DepHealth(
+            name="langfuse", status="not_configured", message="未启用（LANGFUSE_ENABLED=false）"
+        )
+    if not settings.langfuse_configured:
+        return DepHealth(
+            name="langfuse",
+            status="not_configured",
+            message="LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未配置",
+        )
+    import importlib.util
+
+    if importlib.util.find_spec("langfuse") is None:
+        return DepHealth(name="langfuse", status="unavailable", message="langfuse SDK 未安装")
+    return DepHealth(
+        name="langfuse",
+        status="ok",
+        message=(
+            f"已配置（环境 {settings.langfuse_environment}，"
+            f"采样 {settings.langfuse_sample_rate:.0%}，不做联网探活）"
+        ),
+    )
+
+
 async def _probe_exa(settings: Settings) -> DepHealth:
     """Exa 语义搜索：主路径是 HTTP API，npx 只影响 MCP 回退能力。不发付费请求。"""
     if not settings.enable_web_search:
@@ -256,6 +282,8 @@ async def probe_all(
     # 联网搜索只做配置级探测（密钥 / npx），不消耗付费额度
     tasks.append(_probe_tavily(settings))
     tasks.append(_probe_exa(settings))
+    # 可观测性同样只做配置级探测；追踪不可用不影响问答
+    tasks.append(_probe_langfuse(settings))
 
     return list(await asyncio.gather(*tasks))
 

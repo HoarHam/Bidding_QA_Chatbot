@@ -889,6 +889,44 @@ async def test_done_event_includes_message_id_and_feedback_roundtrip(client_fact
         assert cleared.json()["feedback"] is None
 
 
+async def test_trace_id_persisted_and_feedback_scored(client_factory):
+    """助手消息要带着本轮 trace id 落库，👍/👎 才能打到对应的 Langfuse trace。"""
+    import sqlalchemy as sa
+
+    from bidding_qa_chatbot.db.models import Message
+    from bidding_qa_chatbot.observability import LangfuseObservability
+    from tests.test_observability import FakeLangfuseClient
+
+    client = await client_factory(FakeChain())
+    fake = FakeLangfuseClient()
+    client.app.state.observability = LangfuseObservability(client.app.state.settings, client=fake)
+
+    async with client:
+        resp = await client.post("/api/chat/stream", json={"query": "投标保证金期限？"})
+        done = next(data for name, data in _sse_events(resp.text) if name == "done")
+        message_id = done["message_id"]
+
+        async with client.app.state.db.session() as session:
+            message = (
+                await session.execute(sa.select(Message).where(Message.id == uuid.UUID(message_id)))
+            ).scalar_one()
+        assert message.trace_id == fake.trace_id
+
+        # 非 Agent 路径的 trace 结构：检索 + 生成
+        root = fake.roots[0]
+        assert [child.name for child in root.children] == ["retrieval", "llm.generation"]
+        assert root.ended is True
+
+        up = await client.post(f"/api/messages/{message_id}/feedback", json={"rating": "up"})
+        assert up.status_code == 200
+        assert fake.scores[-1]["trace_id"] == fake.trace_id
+        assert fake.scores[-1]["value"] == 1.0
+        assert fake.scores[-1]["score_id"] == f"user-feedback-{message_id}"
+
+        await client.post(f"/api/messages/{message_id}/feedback", json={"rating": None})
+        assert fake.scores[-1]["value"] == 0.0
+
+
 async def test_feedback_rejects_unknown_and_non_assistant(client_factory):
     client = await client_factory(FakeChain())
     async with client:

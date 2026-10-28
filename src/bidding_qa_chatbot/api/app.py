@@ -128,6 +128,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.http = build_http_client(settings)
     app.state.qdrant = build_client(settings)
 
+    # ---- Langfuse 可观测性 ----
+    # 未配置 KEY / 显式关闭 / SDK 初始化失败时返回 no-op，绝不影响问答。
+    from bidding_qa_chatbot.observability import build_observability
+
+    app.state.observability = build_observability(settings)
+    if app.state.observability.enabled:
+        logger.info(
+            "Langfuse 可观测性已启用: %s（环境 %s，采样 %.0f%%，正文上报 %s）",
+            settings.langfuse_base_url,
+            settings.langfuse_environment,
+            settings.langfuse_sample_rate * 100,
+            "开" if settings.langfuse_capture_content else "关",
+        )
+    else:
+        logger.info("Langfuse 可观测性未启用: %s", app.state.observability.reason)
+
     # ---- 附件上传与本地 OCR ----
     from bidding_qa_chatbot.attachments import AttachmentStore
     from bidding_qa_chatbot.llm.ocr import OllamaOCR
@@ -249,6 +265,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # 停止 Langfuse 后台线程并 flush；失败不影响进程退出。
+        observability = getattr(app.state, "observability", None)
+        if observability is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(observability.shutdown)
         await app.state.http.aclose()
         await app.state.qdrant.close()
         with contextlib.suppress(Exception):

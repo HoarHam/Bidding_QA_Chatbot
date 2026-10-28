@@ -42,6 +42,8 @@
   同一个 `message_id`。`query` 以数据库中前一条用户消息为准。
 - **反馈**：`POST /api/messages/{message_id}/feedback`，body 为 `{"rating": "up" | "down" | null}`
   （`null` 清除），返回 `{"id": "...", "feedback": "up"}`。仅本人会话中的助手消息可操作。
+  启用 Langfuse 时，反馈还会以 `user_feedback` 分数（1 / -1 / 0）写回该回答的 trace；
+  打分失败只记日志，不影响反馈落库。
 - `done` 事件现在带 `message_id`（落库失败时为 `null`），前端据此挂载反馈/重新生成。
 - `done.timings` 与历史 `MessageOut.timings` 返回同一份分阶段用时：
   `{total_ms, thinking_ms, tool_ms, generation_ms}`（毫秒，均可为 0）。

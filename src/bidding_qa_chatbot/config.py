@@ -221,6 +221,23 @@ class Settings(BaseSettings):
     exa_mcp_timeout: float = 30.0
     exa_mcp_max_concurrency: int = 2
 
+    # ---------- Langfuse 可观测性 ----------
+    # 未配置 KEY 时整个追踪模块静默禁用，不影响问答主流程。
+    langfuse_enabled: bool = True
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    #: 是否把 prompt / 回答 / 工具结果正文上报到 Langfuse；false = 只报长度与条数。
+    langfuse_capture_content: bool = True
+    #: 出站 HTTP 超时（秒）。
+    langfuse_timeout: float = 5.0
+    #: 按 trace 采样（0.0~1.0）。只影响 span 上报；用户反馈打分始终上报。
+    langfuse_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    #: 环境标签，便于同一项目内分流（dev / staging / prod）。
+    langfuse_environment: str = "dev"
+    #: 单个正文文本字段上报到 Langfuse 的最大字符数，防止超长附件把请求撑爆。
+    langfuse_max_content_chars: int = 12000
+
     # ---------- 路径 ----------
     data_dir: Path = Field(default=ROOT_DIR / "data")
     extracted_dir_name: str = "extracted"
@@ -258,6 +275,21 @@ class Settings(BaseSettings):
         return (
             f"postgresql+psycopg://{user}:{quote_plus(raw)}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db or ''}"
+        )
+
+    @property
+    def langfuse_configured(self) -> bool:
+        """Langfuse 是否具备启用条件。
+
+        缺任一 KEY 都视为未配置：追踪是增强项，不能因为少填一个密钥就让
+        启动失败或问答不可用。`LANGFUSE_ENABLED=false` 可显式关闭而不必删 KEY。
+        """
+        return (
+            self.langfuse_enabled
+            and self.langfuse_public_key is not None
+            and bool(self.langfuse_public_key.get_secret_value().strip())
+            and self.langfuse_secret_key is not None
+            and bool(self.langfuse_secret_key.get_secret_value().strip())
         )
 
     @property

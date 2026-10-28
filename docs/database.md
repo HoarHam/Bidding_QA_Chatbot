@@ -101,6 +101,7 @@ erDiagram
         string feedback
         datetime feedback_at
         json timings
+        string trace_id
         string provider
         string model
     }
@@ -124,6 +125,9 @@ erDiagram
   前端不展示。
 - **`timings`**（迁移 `0007`）：助手回答的分阶段用时
   `{total_ms, thinking_ms, tool_ms, generation_ms}`，用于历史回载时展示。
+- **`trace_id`**（迁移 `0009`）：本轮回答对应的 Langfuse trace id。用户点
+  👍/👎 时后端据此把分数写回原 trace；可观测性未启用时为 NULL，
+  反馈照常落库。详见 `docs/observability.md`。
 - **`feedback` / `feedback_at`**（迁移 `0006`）：用户对助手消息的 👍/👎，
   仅 `"up"` / `"down"` / NULL；`null` 表示未评价/已清除。只允许写本人会话中的助手消息，
   用于后续分析检索与生成策略。

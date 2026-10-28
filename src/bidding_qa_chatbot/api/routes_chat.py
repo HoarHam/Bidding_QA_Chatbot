@@ -22,6 +22,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -41,6 +42,7 @@ from bidding_qa_chatbot.llm.base import StreamEvent as LLMStreamEvent
 from bidding_qa_chatbot.llm.history_summary import ensure_history_summary
 from bidding_qa_chatbot.llm.prompts import NO_CONTEXT_REPLY, build_context, build_messages
 from bidding_qa_chatbot.log import redact
+from bidding_qa_chatbot.observability import TraceHandle, messages_payload, usage_payload
 from bidding_qa_chatbot.schemas import (
     ApiError,
     ApiErrorResponse,
@@ -291,6 +293,7 @@ async def _persist_assistant(
     model: str | None,
     message_id: str | None = None,
     timings: dict | None = None,
+    trace_id: str | None = None,
 ) -> str | None:
     """落库助手回答，返回消息 id（失败返回 None）。
 
@@ -326,6 +329,7 @@ async def _persist_assistant(
                     reasoning=reasoning,
                     sources=combined,
                     timings=timings,
+                    trace_id=trace_id,
                     provider=provider,
                     model=model,
                 )
@@ -338,6 +342,7 @@ async def _persist_assistant(
                 reasoning=reasoning,
                 sources=combined,
                 timings=timings,
+                trace_id=trace_id,
                 provider=provider,
                 model=model,
             )
@@ -345,6 +350,77 @@ async def _persist_assistant(
     except Exception:  # noqa: BLE001
         logger.exception("助手回答落库失败（回答已正常返回给用户）")
         return None
+
+
+async def _traced_llm_stream(
+    stream: AsyncIterator,
+    *,
+    turn: TraceHandle,
+    messages: list,
+    mode: str,
+) -> AsyncIterator:
+    """包一层固定检索路径的 LLM 流，把一次生成记成 Langfuse generation。
+
+    Agent 路径的生成由 `RagAgent` 自己记录（它知道每一步的工具上下文），
+    这里只处理非 Agent 的「先检索、再生成」路径。
+    """
+    generation = turn.start_generation(
+        "llm.generation",
+        input={"messages": messages_payload(messages)},
+        metadata={"mode": mode, "path": "fixed_retrieve"},
+    )
+    content: list[str] = []
+    reasoning: list[str] = []
+    end: StreamEnd | None = None
+    first_event_at: datetime | None = None
+    finished = False
+    try:
+        async for item in stream:
+            if isinstance(item, LLMStreamEvent):
+                (reasoning if item.kind == "reasoning" else content).append(item.text)
+                if first_event_at is None:
+                    first_event_at = datetime.now(UTC)
+            elif isinstance(item, ProviderEvent):
+                generation.update(model=item.model, metadata={"provider": item.provider})
+            elif isinstance(item, StreamEnd):
+                end = item
+            yield item
+        generation.end(
+            output={
+                "content": "".join(content),
+                "reasoning": "".join(reasoning) or None,
+            },
+            model=end.model if end is not None else None,
+            usage_details=usage_payload(end.usage if end is not None else None),
+            metadata={"finish_reason": end.finish_reason if end is not None else None},
+            completion_start_time=first_event_at,
+        )
+        finished = True
+    except Exception as exc:  # noqa: BLE001 — 记录后原样抛出
+        generation.end(
+            level="ERROR",
+            status_message=str(exc),
+            output={"content": "".join(content), "reasoning": "".join(reasoning) or None},
+            completion_start_time=first_event_at,
+        )
+        finished = True
+        raise
+    except BaseException:
+        generation.end(
+            level="WARNING",
+            status_message="cancelled",
+            output={"content": "".join(content)},
+            completion_start_time=first_event_at,
+        )
+        finished = True
+        raise
+    finally:
+        if not finished:
+            generation.end(
+                level="WARNING",
+                status_message="stream closed before completion",
+                output={"content": "".join(content)},
+            )
 
 
 # ------------------------------------------------------------------ SSE
@@ -379,6 +455,24 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
         persist_user_message=regenerate_id is None,
     )
 
+    # 本轮 trace：从摘要生成开始覆盖到最终落库。observability 未注入（测试）
+    # 或未启用时返回 no-op，所有调用开销可忽略。
+    observability = getattr(request.app.state, "observability", None)
+    turn = (
+        observability.start_turn(
+            user_id=str(user.id),
+            conversation_id=conversation_id,
+            query=body.query,
+            mode=body.mode,
+            web_search=bool(body.web_search),
+            has_attachments=attachment_ctx.has_text,
+            regenerate=regenerate_id is not None,
+            endpoint="stream",
+        )
+        if observability is not None
+        else TraceHandle.noop()
+    )
+
     # 历史摘要：消息超过保留窗口时先压缩更早内容（等待完成，前端不可见；失败不阻塞）
     history_summary = await ensure_history_summary(
         chain=chain,
@@ -386,6 +480,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
         settings=settings,
         user_id=user.id,
         conversation_id=uuid.UUID(conversation_id),
+        trace=turn,
     )
 
     agent = getattr(request.app.state, "agent", None)
@@ -419,11 +514,18 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
             ),
             body.mode,
             allowed_tools=allowed_tools,
+            trace=turn,
         )
     else:
+        retrieval_trace = turn.start_span(
+            "retrieval",
+            input={"query": body.query, "top_k": body.top_k},
+            metadata={"path": "fixed_retrieve"},
+        )
         try:
             result = await _retrieve(request, body)
-        except HTTPException:
+        except HTTPException as exc:
+            retrieval_trace.end(level="ERROR", status_message=str(exc))
             if not attachment_ctx.has_text:
                 raise
             # 附件问题不应被本地编码器缺失拖死：降级为空检索继续作答
@@ -431,6 +533,17 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
 
             logger.warning("检索不可用，但存在附件文本：降级为空检索继续")
             result = RetrievalResult(sources=[], elapsed_ms=0)
+        except Exception as exc:  # noqa: BLE001 — 记录后原样抛出
+            retrieval_trace.end(level="ERROR", status_message=str(exc))
+            raise
+        else:
+            retrieval_trace.end(
+                output={
+                    "sources": len(result.sources),
+                    "chunk_ids": [s.chunk_id for s in result.sources],
+                    "elapsed_ms": result.elapsed_ms,
+                }
+            )
         initial_sources = [s.to_ref() for s in result.sources]
         initial_elapsed = result.elapsed_ms
         context = build_context(result.sources, settings.max_context_chars)
@@ -442,7 +555,12 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
             prior_attachment_text=attachment_ctx.prior_text,
             history_summary=history_summary,
         )
-        source_iter = chain.stream_with_fallback(LLMRequest(messages=messages, mode=body.mode))
+        source_iter = _traced_llm_stream(
+            chain.stream_with_fallback(LLMRequest(messages=messages, mode=body.mode)),
+            turn=turn,
+            messages=messages,
+            mode=body.mode,
+        )
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -463,6 +581,11 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
         task.cancel()
         with contextlib.suppress(Exception):
             await asyncio.gather(task, return_exceptions=True)
+        turn.end(
+            level="ERROR",
+            status_message=str(first_payload),
+            metadata={"finish_reason": "error"},
+        )
         return _error_response(request_id, first_payload)
 
     # 边流边累积，用于流结束后把整轮对话落库
@@ -475,6 +598,16 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
     persisted = {"done": False, "message_id": None, "timings": None}
     #: 分阶段用时状态：首个正文 token 的时刻 + 工具执行累计毫秒
     timing_state = {"first_content_at": None, "tool_ms": 0}
+    #: trace 收尾信息。无论正常结束、模型报错还是客户端断开，finally 都会用它
+    #: 给根 span 一个可读的输出，而不是留下一个没有结论的悬空 trace。
+    trace_state: dict = {
+        "terminal": False,
+        "error": False,
+        "finish_reason": None,
+        "steps": 0,
+        "tool_calls": 0,
+        "usage": None,
+    }
 
     async def generate() -> AsyncIterator[str]:
         # 老路径下参考来源**先于**任何 token 发出，这样「展示参考来源」
@@ -499,6 +632,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                 if pending_kind == "eof":
                     break
                 if pending_kind == "error":
+                    trace_state.update(error=True, finish_reason="error")
                     yield _mid_stream_frame(request_id, pending)
                     break
 
@@ -510,6 +644,24 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     collected_web_sources,
                     finished,
                 )
+
+                if isinstance(pending, AgentDone):
+                    trace_state.update(
+                        terminal=True,
+                        finish_reason=pending.finish_reason,
+                        steps=pending.steps,
+                        tool_calls=pending.tool_calls,
+                        usage=pending.usage,
+                    )
+                elif isinstance(pending, StreamEnd) and not use_agent:
+                    trace_state.update(
+                        terminal=True,
+                        finish_reason=pending.finish_reason,
+                        steps=1,
+                        usage=pending.usage,
+                    )
+                elif isinstance(pending, MidStreamError | AllProvidersFailed):
+                    trace_state.update(error=True, finish_reason="error")
 
                 # 记录分阶段用时：首个正文 token 的时刻 + 工具执行累计
                 if (
@@ -544,6 +696,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                         model=finished["model"],
                         message_id=regenerate_id,
                         timings=persisted["timings"],
+                        trace_id=turn.trace_id,
                     )
                     # 落库成功才标记；失败留给 finally 再试一次
                     persisted["done"] = persisted["message_id"] is not None
@@ -588,14 +741,14 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                 await asyncio.gather(task, return_exceptions=True)
             # 即便中途失败也把已产出的部分存下来——用户已经看到了这段内容，
             # 历史里没有它反而会让回看时对不上。正常收尾已在 done 帧前落库。
+            final_timings = persisted["timings"] or _build_timings(
+                request_started,
+                timing_state["first_content_at"],
+                timing_state["tool_ms"],
+                time.perf_counter(),
+            )
             if not persisted["done"]:
                 with contextlib.suppress(Exception):
-                    timings = _build_timings(
-                        request_started,
-                        timing_state["first_content_at"],
-                        timing_state["tool_ms"],
-                        time.perf_counter(),
-                    )
                     await _persist_assistant(
                         request,
                         user=user,
@@ -607,8 +760,42 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                         provider=finished["provider"],
                         model=finished["model"],
                         message_id=regenerate_id,
-                        timings=timings,
+                        timings=final_timings,
+                        trace_id=turn.trace_id,
                     )
+
+            if trace_state["error"]:
+                level, status_message = "ERROR", "stream error"
+            elif trace_state["terminal"]:
+                finish_reason = trace_state["finish_reason"] or "done"
+                level = "WARNING" if finish_reason == "length" else "DEFAULT"
+                status_message = finish_reason
+            else:
+                # 用户停止/断开：已经产出的部分仍会落库，但 trace 要标明未完成。
+                level, status_message = "WARNING", "client disconnected or aborted"
+
+            turn.end(
+                output={
+                    "answer": "".join(answer_parts),
+                    "reasoning": "".join(reasoning_parts) or None,
+                    "sources": len(collected_sources),
+                    "web_sources": len(collected_web_sources),
+                    "provider": finished["provider"],
+                    "model": finished["model"],
+                    "finish_reason": trace_state["finish_reason"],
+                    "steps": trace_state["steps"],
+                    "tool_calls": trace_state["tool_calls"],
+                },
+                metadata={
+                    "finish_reason": trace_state["finish_reason"],
+                    "steps": trace_state["steps"],
+                    "tool_calls": trace_state["tool_calls"],
+                    "timings": final_timings,
+                },
+                usage_details=usage_payload(trace_state["usage"]),
+                level=level,
+                status_message=status_message,
+            )
 
     return StreamingResponse(
         generate(),
@@ -829,84 +1016,206 @@ async def chat(
         request, user, body, attachments=attachment_ctx.persisted or None
     )
 
-    history_summary = await ensure_history_summary(
-        chain=chain,
-        db=request.app.state.db,
-        settings=settings,
-        user_id=user.id,
-        conversation_id=uuid.UUID(conversation_id),
+    observability = getattr(request.app.state, "observability", None)
+    turn = (
+        observability.start_turn(
+            user_id=str(user.id),
+            conversation_id=conversation_id,
+            query=body.query,
+            mode=body.mode,
+            web_search=bool(body.web_search),
+            has_attachments=attachment_ctx.has_text,
+            endpoint="one_shot",
+        )
+        if observability is not None
+        else TraceHandle.noop()
     )
+    trace_state: dict = {
+        "finish_reason": None,
+        "error": None,
+        "cancelled": False,
+        "answer": "",
+        "reasoning": None,
+        "provider": None,
+        "model": None,
+        "usage": None,
+        "sources": [],
+    }
 
     try:
-        result = await _retrieve(request, body)
-    except HTTPException:
-        if not attachment_ctx.has_text:
+        history_summary = await ensure_history_summary(
+            chain=chain,
+            db=request.app.state.db,
+            settings=settings,
+            user_id=user.id,
+            conversation_id=uuid.UUID(conversation_id),
+            trace=turn,
+        )
+
+        retrieval_trace = turn.start_span(
+            "retrieval",
+            input={"query": body.query, "top_k": body.top_k},
+            metadata={"path": "fixed_retrieve"},
+        )
+        try:
+            result = await _retrieve(request, body)
+        except HTTPException as exc:
+            retrieval_trace.end(level="ERROR", status_message=str(exc))
+            if not attachment_ctx.has_text:
+                raise
+            from bidding_qa_chatbot.retrieval.service import RetrievalResult
+
+            logger.warning("检索不可用，但存在附件文本：降级为空检索继续")
+            result = RetrievalResult(sources=[], elapsed_ms=0)
+        except Exception as exc:  # noqa: BLE001 — 记录后原样抛出
+            retrieval_trace.end(level="ERROR", status_message=str(exc))
             raise
-        from bidding_qa_chatbot.retrieval.service import RetrievalResult
+        else:
+            retrieval_trace.end(
+                output={
+                    "sources": len(result.sources),
+                    "chunk_ids": [s.chunk_id for s in result.sources],
+                    "elapsed_ms": result.elapsed_ms,
+                }
+            )
 
-        logger.warning("检索不可用，但存在附件文本：降级为空检索继续")
-        result = RetrievalResult(sources=[], elapsed_ms=0)
+        context = build_context(result.sources, settings.max_context_chars)
+        messages = build_messages(
+            body.query,
+            context,
+            body.history,
+            attachment_text=attachment_ctx.current_text,
+            prior_attachment_text=attachment_ctx.prior_text,
+            history_summary=history_summary,
+        )
+        sources = [s.to_ref() for s in result.sources]
+        trace_state["sources"] = [s.model_dump(mode="json") for s in sources]
 
-    context = build_context(result.sources, settings.max_context_chars)
-    messages = build_messages(
-        body.query,
-        context,
-        body.history,
-        attachment_text=attachment_ctx.current_text,
-        prior_attachment_text=attachment_ctx.prior_text,
-        history_summary=history_summary,
-    )
-    sources = [s.to_ref() for s in result.sources]
+        if not result.sources and not attachment_ctx.has_text:
+            trace_state.update(
+                finish_reason="no_context",
+                answer=NO_CONTEXT_REPLY,
+                provider="none",
+                model="none",
+            )
+            await _persist_assistant(
+                request,
+                user=user,
+                conversation_id=conversation_id,
+                content=NO_CONTEXT_REPLY,
+                reasoning=None,
+                sources=[],
+                web_sources=[],
+                provider="none",
+                model="none",
+                trace_id=turn.trace_id,
+            )
+            return ChatResponse(
+                answer=NO_CONTEXT_REPLY,
+                sources=[],
+                provider="none",
+                model="none",
+                finish_reason="no_context",
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+                request_id=request_id,
+                conversation_id=conversation_id,
+            )
 
-    if not result.sources and not attachment_ctx.has_text:
+        generation = turn.start_generation(
+            "llm.generation",
+            input={"messages": messages_payload(messages)},
+            metadata={"mode": body.mode, "path": "one_shot"},
+        )
+        try:
+            llm_result = await chain.complete(LLMRequest(messages=messages, mode=body.mode))
+        except AllProvidersFailed as exc:
+            generation.end(level="ERROR", status_message=str(exc))
+            trace_state.update(error=exc, finish_reason="error")
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BaseException:
+            generation.end(level="WARNING", status_message="cancelled")
+            trace_state["cancelled"] = True
+            raise
+
+        generation.end(
+            output={
+                "content": llm_result.text,
+                "reasoning": llm_result.reasoning,
+            },
+            model=llm_result.model,
+            usage_details=usage_payload(llm_result.usage),
+            metadata={
+                "provider": llm_result.provider,
+                "finish_reason": llm_result.finish_reason,
+            },
+            level="WARNING" if llm_result.finish_reason == "length" else "DEFAULT",
+        )
+        trace_state.update(
+            finish_reason=llm_result.finish_reason,
+            answer=llm_result.text,
+            reasoning=llm_result.reasoning,
+            provider=llm_result.provider,
+            model=llm_result.model,
+            usage=llm_result.usage,
+        )
+
         await _persist_assistant(
             request,
             user=user,
             conversation_id=conversation_id,
-            content=NO_CONTEXT_REPLY,
-            reasoning=None,
-            sources=[],
+            content=llm_result.text,
+            reasoning=llm_result.reasoning,
+            sources=[s.model_dump(mode="json") for s in sources],
             web_sources=[],
-            provider="none",
-            model="none",
+            provider=llm_result.provider,
+            model=llm_result.model,
+            trace_id=turn.trace_id,
         )
+
         return ChatResponse(
-            answer=NO_CONTEXT_REPLY,
-            sources=[],
-            provider="none",
-            model="none",
-            finish_reason="no_context",
+            answer=llm_result.text,
+            reasoning=llm_result.reasoning,
+            sources=sources,
+            provider=llm_result.provider,
+            model=llm_result.model,
+            finish_reason=llm_result.finish_reason,
+            usage=_to_usage(llm_result.usage),
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             request_id=request_id,
             conversation_id=conversation_id,
         )
+    except HTTPException as exc:
+        trace_state.update(error=exc, finish_reason="error")
+        raise
+    except BaseException:
+        trace_state["cancelled"] = True
+        raise
+    finally:
+        if trace_state["error"] is not None:
+            level, status_message = "ERROR", "request failed"
+        elif trace_state["cancelled"]:
+            level, status_message = "WARNING", "cancelled"
+        elif trace_state["finish_reason"]:
+            finish_reason = trace_state["finish_reason"]
+            level = "WARNING" if finish_reason == "length" else "DEFAULT"
+            status_message = finish_reason
+        else:
+            level, status_message = "WARNING", "incomplete"
 
-    try:
-        llm_result = await chain.complete(LLMRequest(messages=messages, mode=body.mode))
-    except AllProvidersFailed as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    await _persist_assistant(
-        request,
-        user=user,
-        conversation_id=conversation_id,
-        content=llm_result.text,
-        reasoning=llm_result.reasoning,
-        sources=[s.model_dump(mode="json") for s in sources],
-        web_sources=[],
-        provider=llm_result.provider,
-        model=llm_result.model,
-    )
-
-    return ChatResponse(
-        answer=llm_result.text,
-        reasoning=llm_result.reasoning,
-        sources=sources,
-        provider=llm_result.provider,
-        model=llm_result.model,
-        finish_reason=llm_result.finish_reason,
-        usage=_to_usage(llm_result.usage),
-        elapsed_ms=int((time.perf_counter() - started) * 1000),
-        request_id=request_id,
-        conversation_id=conversation_id,
-    )
+        turn.end(
+            output={
+                "answer": trace_state["answer"],
+                "reasoning": trace_state["reasoning"],
+                "sources": len(trace_state["sources"]),
+                "provider": trace_state["provider"],
+                "model": trace_state["model"],
+                "finish_reason": trace_state["finish_reason"],
+            },
+            metadata={
+                "finish_reason": trace_state["finish_reason"],
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            },
+            usage_details=usage_payload(trace_state["usage"]),
+            level=level,
+            status_message=status_message,
+        )

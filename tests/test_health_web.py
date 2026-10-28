@@ -65,3 +65,24 @@ async def test_probe_all_includes_web_entries(monkeypatch, settings_factory):
 
     assert by_name["tavily"].status == "ok"
     assert by_name["exa"].status == "ok"
+    assert by_name["langfuse"].status == "not_configured"
+
+
+async def test_langfuse_probe_is_config_level(settings_factory):
+    disabled = await rh._probe_langfuse(settings_factory(langfuse_enabled=False))
+    assert disabled.status == "not_configured"
+    assert "LANGFUSE_ENABLED" in (disabled.message or "")
+
+    missing = await rh._probe_langfuse(settings_factory(langfuse_enabled=True))
+    assert missing.status == "not_configured"
+    assert "LANGFUSE_PUBLIC_KEY" in (missing.message or "")
+
+    configured = await rh._probe_langfuse(
+        settings_factory(
+            langfuse_enabled=True,
+            langfuse_public_key="pk",
+            langfuse_secret_key="sk",
+        )
+    )
+    assert configured.status == "ok"
+    assert "不做联网探活" in (configured.message or "")

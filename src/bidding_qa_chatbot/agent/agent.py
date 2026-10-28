@@ -23,6 +23,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from bidding_qa_chatbot.agent.base import ToolRegistry, ToolResult
@@ -33,6 +34,12 @@ from bidding_qa_chatbot.llm.base import (
     LLMRequest,
     StreamEnd,
     StreamEvent,
+)
+from bidding_qa_chatbot.observability import (
+    TraceHandle,
+    messages_payload,
+    tool_output_payload,
+    usage_payload,
 )
 from bidding_qa_chatbot.schemas import FallbackEvent, ProviderEvent
 
@@ -133,12 +140,16 @@ class RagAgent:
         mode: str = "fast",
         *,
         allowed_tools: set[str] | None = None,
+        trace: TraceHandle | None = None,
     ) -> AsyncIterator[AgentItem | AgentDone]:
         """跑一轮 Agent。
 
         `allowed_tools` 是本请求允许调用的工具集合（None = 全部允许）。
         注册表是应用级单例，**不能按请求修改**；这里在发请求前过滤 schema，
         并在执行侧同样校验——模型若点名一个未被允许的工具，不能真的执行。
+
+        `trace` 是可选的 Langfuse 句柄。为 None 时 all no-op，Agent 行为与
+        未接入可观测性时完全一致。
         """
         schemas = self.registry.schemas()
         if allowed_tools is not None:
@@ -146,6 +157,7 @@ class RagAgent:
         max_steps = max(1, self.settings.agent_max_steps)
         steps = 0
         total_tool_calls = 0
+        root_trace = trace or TraceHandle.noop()
 
         for step in range(max_steps):
             steps = step + 1
@@ -156,30 +168,117 @@ class RagAgent:
                 mode=mode,  # type: ignore[arg-type]
                 tools=None if is_last else (schemas or None),
             )
+            tool_names = [s["function"]["name"] for s in (req.tools or [])]
+
+            # 每个 Agent 轮次一个 span，LLM 调用与工具执行都是它的子节点，
+            # 这样在 Langfuse 里能直接看出「哪一步查了什么、模型据此说了什么」。
+            step_trace = root_trace.start_span(
+                f"agent.step.{steps}",
+                input={"message_count": len(messages)},
+                metadata={"step": steps, "last_step": is_last, "tools": tool_names},
+            )
+            generation = step_trace.start_generation(
+                f"llm.step.{steps}",
+                input={"messages": messages_payload(messages)},
+                metadata={
+                    "step": steps,
+                    "mode": mode,
+                    "last_step": is_last,
+                    "tools": tool_names,
+                },
+            )
 
             turn_content: list[str] = []
+            turn_reasoning: list[str] = []
             end: StreamEnd | None = None
+            completion_start_time: datetime | None = None
+            fallback_attempts: list[dict[str, Any]] = []
 
-            async for item in self.chain.stream_with_fallback(req):
-                if isinstance(item, StreamEvent):
-                    if item.kind == "content":
-                        turn_content.append(item.text)
-                    # 内容与思考都实时转发，保持流式观感
-                    yield item
-                elif isinstance(item, StreamEnd):
-                    end = item
-                elif isinstance(item, FallbackEvent):
-                    yield item
-                elif isinstance(item, ProviderEvent) and step == 0:
-                    # 只在首轮上报 provider，避免多轮重复刷新界面
-                    yield item
+            try:
+                async for item in self.chain.stream_with_fallback(req):
+                    if isinstance(item, StreamEvent):
+                        if item.kind == "content":
+                            turn_content.append(item.text)
+                        else:
+                            turn_reasoning.append(item.text)
+                        if completion_start_time is None:
+                            completion_start_time = datetime.now(UTC)
+                        # 内容与思考都实时转发，保持流式观感
+                        yield item
+                    elif isinstance(item, StreamEnd):
+                        end = item
+                    elif isinstance(item, FallbackEvent):
+                        fallback_attempts.extend(
+                            attempt.model_dump(mode="json") for attempt in item.attempts
+                        )
+                        yield item
+                    elif isinstance(item, ProviderEvent):
+                        # 先到的 provider 事件就能确定实际执行者（回退后不是主 provider）
+                        generation.update(model=item.model, metadata={"provider": item.provider})
+                        if step == 0:
+                            # 只在首轮上报 provider，避免多轮重复刷新界面
+                            yield item
 
-            if end is None:
-                # 链路没有一个 provider 成功（异常已在 chain 内抛出），
-                # 走到这里说明是空流，交给上层按错误处理
-                raise AllProvidersFailed([])
+                if end is None:
+                    # 链路没有一个 provider 成功（异常已在 chain 内抛出），
+                    # 走到这里说明是空流，交给上层按错误处理
+                    raise AllProvidersFailed([])
+            except Exception as exc:  # noqa: BLE001 — 记录后原样抛出
+                generation.end(
+                    level="ERROR",
+                    status_message=str(exc),
+                    output={
+                        "content": "".join(turn_content),
+                        "reasoning": "".join(turn_reasoning) or None,
+                    },
+                    completion_start_time=completion_start_time,
+                )
+                step_trace.end(
+                    level="ERROR",
+                    status_message=str(exc),
+                    metadata={"step": steps, "error_type": type(exc).__name__},
+                )
+                raise
+            except BaseException:
+                # 取消 / 客户端断开：不是模型失败，但 span 必须收尾。
+                generation.end(
+                    level="WARNING",
+                    status_message="cancelled",
+                    output={"content": "".join(turn_content)},
+                    completion_start_time=completion_start_time,
+                )
+                step_trace.end(level="WARNING", status_message="cancelled")
+                raise
+
+            generation_output = {
+                "content": "".join(turn_content),
+                "reasoning": "".join(turn_reasoning) or None,
+                "tool_calls": [
+                    {"name": tc.name, "arguments": tc.arguments} for tc in end.tool_calls
+                ]
+                or None,
+            }
+            generation.end(
+                output=generation_output,
+                model=end.model,
+                usage_details=usage_payload(end.usage),
+                metadata={
+                    "finish_reason": end.finish_reason,
+                    "provider": end.provider,
+                    "fallback_attempts": fallback_attempts or None,
+                },
+                level="WARNING" if end.finish_reason == "length" else "DEFAULT",
+                completion_start_time=completion_start_time,
+            )
 
             if not end.tool_calls:
+                step_trace.end(
+                    output={
+                        "content": generation_output["content"],
+                        "tool_calls": 0,
+                    },
+                    metadata={"finish_reason": end.finish_reason},
+                )
                 yield AgentDone(
                     finish_reason=end.finish_reason,
                     steps=steps,
@@ -202,6 +301,7 @@ class RagAgent:
                 )
             )
 
+            tool_results: list[dict[str, Any]] = []
             for tc in end.tool_calls:
                 total_tool_calls += 1
                 args = tc.parsed_arguments()
@@ -210,23 +310,47 @@ class RagAgent:
                     arguments=args,
                     display=_display_for(tc.name, args),
                 )
+                tool_trace = step_trace.start_tool(
+                    f"tool.{tc.name}",
+                    input={"arguments": args},
+                    metadata={"step": steps, "tool_call_id": tc.id},
+                )
 
                 started = time.perf_counter()
-                if allowed_tools is not None and tc.name not in allowed_tools:
-                    # 只过滤 schema 还不够：模型可能幻构/越权点名未启用的工具
-                    result = ToolResult(
-                        name=tc.name,
-                        ok=False,
-                        error="tool_not_enabled",
-                        content=(
-                            f"错误：工具 {tc.name} 本次请求未启用（用户没有开启对应功能）。"
-                            "请改用其他可用工具，或基于已有信息作答。"
-                        ),
-                    )
-                else:
-                    result = await self.registry.execute(tc.name, args)
+                try:
+                    if allowed_tools is not None and tc.name not in allowed_tools:
+                        # 只过滤 schema 还不够：模型可能幻构/越权点名未启用的工具
+                        result = ToolResult(
+                            name=tc.name,
+                            ok=False,
+                            error="tool_not_enabled",
+                            content=(
+                                f"错误：工具 {tc.name} 本次请求未启用（用户没有开启对应功能）。"
+                                "请改用其他可用工具，或基于已有信息作答。"
+                            ),
+                        )
+                    else:
+                        result = await self.registry.execute(tc.name, args)
+                except BaseException:
+                    tool_trace.end(level="WARNING", status_message="cancelled")
+                    step_trace.end(level="WARNING", status_message="cancelled")
+                    raise
                 if not result.elapsed_ms:
                     result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+                tool_trace.end(
+                    output=tool_output_payload(result),
+                    metadata={
+                        "step": steps,
+                        "ok": result.ok,
+                        "error": result.error,
+                        "elapsed_ms": result.elapsed_ms,
+                        "degraded": bool(result.artifacts.get("degraded")),
+                    },
+                    level="DEFAULT" if result.ok else "ERROR",
+                    status_message=result.error,
+                )
+                tool_results.append({"name": result.name, "ok": result.ok})
 
                 yield ToolResultNotice(
                     name=result.name,
@@ -241,6 +365,15 @@ class RagAgent:
                 messages.append(
                     ChatMessage(role="tool", content=result.content, tool_call_id=tc.id)
                 )
+
+            step_trace.end(
+                output={
+                    "content": generation_output["content"],
+                    "tool_calls": [tc.name for tc in end.tool_calls],
+                    "results": tool_results,
+                },
+                metadata={"finish_reason": end.finish_reason},
+            )
 
         # 理论上到不了：最后一轮不带工具，必然产出回答。
         # 真到了说明 provider 行为异常，给一个明确的收尾而不是静默卡住。

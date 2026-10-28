@@ -23,6 +23,10 @@ httpx 默认 `trust_env=True` 会走它，而该代理连不通 Qdrant Cloud，�
 因此 Qdrant 客户端与健康检查客户端默认 `trust_env=False`（见 `HTTP_TRUST_ENV`）。
 如果你的网络确实必须经代理，把它设为 `true`。
 
+Langfuse SDK 默认会自建 httpx 客户端并读取代理环境变量，所以
+`observability/service.py` 也显式注入一个使用 `HTTP_TRUST_ENV` 的同步客户端——
+否则追踪会静默失效，而问答看起来完全正常。
+
 ### 2. HuggingFace 直连不通
 
 `huggingface.co` 与 `cdn-lfs.huggingface.co` 均超时，`hf-mirror.com` 可用。

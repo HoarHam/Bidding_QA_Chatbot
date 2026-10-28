@@ -21,6 +21,7 @@ flowchart LR
         WEB["联网层<br/>Tavily 缓存 · Exa API/MCP"]
         ATT["附件层<br/>上传存储 · PDF/DOCX 提取"]
         LLM["LLM 层<br/>provider 链 + 回退"]
+        OBS["可观测性<br/>Langfuse trace / score"]
     end
 
     subgraph ext["外部依赖"]
@@ -31,6 +32,7 @@ flowchart LR
         DS["DeepSeek<br/>deepseek-flash"]
         ZP["智谱<br/>glm-4.7-flashx"]
         VL["vLLM<br/>本地（仅留接口）"]
+        LF["Langfuse Cloud<br/>trace / feedback score"]
     end
 
     subgraph local["本地模型 (CPU)"]
@@ -58,6 +60,8 @@ flowchart LR
     LLM --> DS
     LLM -.降级.-> ZP
     LLM -.降级.-> VL
+    API -.异步旁路（失败不影响问答）.-> LF
+    AG -.Agent/工具 span.-> LF
 ```
 
 ## 一次问答的时序

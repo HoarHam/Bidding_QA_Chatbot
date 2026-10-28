@@ -171,6 +171,7 @@ async def add_message(
     sources: list | None = None,
     attachments: list | None = None,
     timings: dict | None = None,
+    trace_id: str | None = None,
     provider: str | None = None,
     model: str | None = None,
     title_from: bool = False,
@@ -195,6 +196,7 @@ async def add_message(
         sources=_json_safe(sources),
         attachments=_json_safe(attachments),
         timings=_json_safe(timings),
+        trace_id=trace_id,
         provider=provider,
         model=model,
     )
@@ -315,6 +317,7 @@ async def update_assistant_message(
     reasoning: str | None,
     sources: list,
     timings: dict | None = None,
+    trace_id: str | None = None,
     provider: str | None = None,
     model: str | None = None,
 ) -> bool:
@@ -326,6 +329,7 @@ async def update_assistant_message(
     message.reasoning = reasoning
     message.sources = _json_safe(sources)
     message.timings = _json_safe(timings)
+    message.trace_id = trace_id
     message.provider = provider
     message.model = model
     message.feedback = None
