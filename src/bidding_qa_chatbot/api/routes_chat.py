@@ -116,6 +116,7 @@ async def _retrieve(request: Request, body: ChatRequest):
         settings,
         bm25_artifact=getattr(request.app.state, "bm25", None),
         collection_vocab_sha1=getattr(request.app.state, "collection_vocab_sha1", None),
+        cache=getattr(request.app.state, "retrieval_cache", None),
     )
     return await retriever.retrieve(body.query, top_k=body.top_k)
 
@@ -542,6 +543,7 @@ async def chat_stream(body: ChatRequest, request: Request, user: CurrentUser):
                     "sources": len(result.sources),
                     "chunk_ids": [s.chunk_id for s in result.sources],
                     "elapsed_ms": result.elapsed_ms,
+                    "cache_hit": result.cache_hit,
                 }
             )
         initial_sources = [s.to_ref() for s in result.sources]
@@ -1076,6 +1078,7 @@ async def chat(
                     "sources": len(result.sources),
                     "chunk_ids": [s.chunk_id for s in result.sources],
                     "elapsed_ms": result.elapsed_ms,
+                    "cache_hit": result.cache_hit,
                 }
             )
 

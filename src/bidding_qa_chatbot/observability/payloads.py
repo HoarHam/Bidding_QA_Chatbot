@@ -71,10 +71,13 @@ def usage_payload(usage: Any | None) -> dict[str, int] | None:
 def tool_output_payload(result: Any) -> dict[str, Any]:
     """工具结果的紧凑视图（正文由 TraceHandle 按内容开关决定是否截断/省略）。"""
     artifacts = getattr(result, "artifacts", None) or {}
-    return {
+    payload: dict[str, Any] = {
         "content": getattr(result, "content", "") or "",
         "error": getattr(result, "error", None),
         "sources": len(artifacts.get("sources") or []),
         "web_sources": len(artifacts.get("web_sources") or []),
         "degraded": bool(artifacts.get("degraded")),
     }
+    if "cache_hit" in artifacts:
+        payload["cache_hit"] = bool(artifacts["cache_hit"])
+    return payload

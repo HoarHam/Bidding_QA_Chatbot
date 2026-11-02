@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     rerank_min_score: float = 0.0
     max_context_chars: int = 6000
     sparse_strict: bool = False
+    # ---------- 检索结果缓存（query embedding → Qdrant 候选文档） ----------
+    # 同一个查询向量重复出现时跳过 Qdrant query_points，精排仍按当前问题重算。
+    retrieval_cache_enabled: bool = True
+    retrieval_cache_maxsize: int = Field(default=128, ge=0)
+    # 0 表示不按时间过期；默认 10 分钟，避免重新入库后长时间命中旧候选。
+    retrieval_cache_ttl: float = Field(default=600.0, ge=0.0)
 
     # ---------- 嵌入模型 (需求 6) ----------
     embed_model_name: str = "BAAI/bge-small-zh-v1.5"

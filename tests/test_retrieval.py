@@ -17,6 +17,7 @@ from qdrant_client import models as qm
 
 from bidding_qa_chatbot.ingestion.ids import make_point_id
 from bidding_qa_chatbot.retrieval import bm25 as bm25_mod
+from bidding_qa_chatbot.retrieval.cache import RetrievalCache
 from bidding_qa_chatbot.retrieval.qdrant_store import (
     DENSE_VECTOR,
     SPARSE_VECTOR,
@@ -178,6 +179,34 @@ async def test_retriever_end_to_end_with_rerank(memory_store):
     assert scores == sorted(scores, reverse=True)
     # 精排收到的文本必须与入库文本一致，否则排序会莫名其妙地翻转
     assert all(text in [f"{q}\n{a}" for _, q, a in DOCS] for _, text in reranker.seen)
+
+
+async def test_cached_candidates_are_reranked_again_for_each_query(memory_store):
+    """缓存的是候选点，不是精排结果：第二次仍要按当前问题跑 CrossEncoder。"""
+    from tests.conftest import FakeEncoder, FakeReranker
+
+    encoder = FakeEncoder()
+    reranker = FakeReranker()
+    artifact = bm25_mod.build_artifact([f"{q}\n{a}" for _, q, a in DOCS], "c")
+    settings = await _seed(memory_store, artifact, encoder)
+    cache = RetrievalCache(maxsize=8)
+
+    retriever = Retriever(
+        memory_store,
+        encoder,
+        reranker,
+        settings,
+        bm25_artifact=artifact,
+        cache=cache,
+    )
+    first = await retriever.retrieve("投标保证金退还", top_k=3)
+    reranker.seen.clear()
+    second = await retriever.retrieve("投标保证金退还", top_k=3)
+
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert [s.chunk_id for s in first.sources] == [s.chunk_id for s in second.sources]
+    assert reranker.seen, "命中候选缓存后仍必须重新精排"
 
 
 async def test_retriever_degrades_when_vocab_stale(memory_store):

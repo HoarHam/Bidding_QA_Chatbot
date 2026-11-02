@@ -334,6 +334,34 @@ def test_agent_built_even_when_local_models_missing():
     assert agent.registry.get("search_bidding_knowledge").retriever.available is False
 
 
+def test_agent_uses_shared_retrieval_cache():
+    """Agent 的检索工具必须拿到 app.state 的同一个缓存实例。
+
+    如果每次 build_agent 都新建缓存，Agent 工具与固定检索路径各存一份，
+    缓存命中率会退化成「同一路径内偶发命中」，基本等于没做。
+    """
+    from bidding_qa_chatbot.api.app import build_agent
+    from bidding_qa_chatbot.retrieval.cache import RetrievalCache
+
+    settings = _settings()
+    settings.agent_enabled = True
+    cache = RetrievalCache(maxsize=8)
+
+    agent = build_agent(
+        settings,
+        chain=object(),
+        qdrant=object(),
+        encoder=None,
+        reranker=None,
+        bm25_artifact=None,
+        collection_vocab_sha1=None,
+        retrieval_cache=cache,
+    )
+
+    retriever = agent.registry.get("search_bidding_knowledge").retriever
+    assert retriever.cache is cache
+
+
 def test_agent_not_built_when_disabled():
     from bidding_qa_chatbot.api.app import build_agent
 

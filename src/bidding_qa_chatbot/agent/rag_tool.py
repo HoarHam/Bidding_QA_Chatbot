@@ -95,7 +95,11 @@ class RagSearchTool:
                     "请如实告知用户「根据知识库无法确定」，不要凭记忆作答。"
                 ),
                 ok=True,
-                artifacts={"sources": [], "degraded": result.degraded},
+                artifacts={
+                    "sources": [],
+                    "degraded": result.degraded,
+                    "cache_hit": result.cache_hit,
+                },
                 elapsed_ms=elapsed,
             )
 
@@ -115,6 +119,7 @@ class RagSearchTool:
                 "retrieved": len(result.sources),
                 "degraded": result.degraded,
                 "degrade_reason": result.reason,
+                "cache_hit": result.cache_hit,
             },
             elapsed_ms=elapsed,
         )

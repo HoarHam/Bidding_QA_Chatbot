@@ -16,7 +16,7 @@ flowchart LR
     subgraph server["Python 后端 (FastAPI)"]
         API["API 层<br/>/api/chat/stream · SSE"]
         AG["Agent 层<br/>工具调用循环 + 按请求门控"]
-        RET["检索层<br/>hybrid → RRF → rerank"]
+        RET["检索层<br/>LRU 候选缓存 → hybrid → rerank"]
         GR["图谱层<br/>只读事务 + 参数化模板"]
         WEB["联网层<br/>Tavily 缓存 · Exa API/MCP"]
         ATT["附件层<br/>上传存储 · PDF/DOCX 提取"]

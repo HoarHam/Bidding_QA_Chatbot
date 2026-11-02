@@ -64,6 +64,43 @@ stateDiagram-v2
     缺失 --> 仅稠密
 ```
 
+## 候选缓存
+
+同一查询向量重复出现时，跳过 Qdrant 的 `query_points`，直接复用上次的候选文档：
+
+```mermaid
+flowchart LR
+    Q["问题"] --> E["dense 向量 + BM25 稀疏向量"]
+    E --> K["缓存键<br/>向量 + 集合 + top_k + 预取数 + 模型/词表指纹"]
+    K -->|命中| C[("LRU<br/>候选点 + payload")]
+    K -->|未命中| QD[("Qdrant<br/>Prefetch + RRF")]
+    QD --> C
+    C --> RR["CrossEncoder 精排<br/>（每次都重算）"]
+```
+
+缓存的是 **Qdrant 返回的候选点**（文档 id + payload + RRF 分数），不是精排后的
+`RetrievedSource`：
+
+- 精排分数依赖当前问题的原文，缓存它会把旧问题的排序带过来；
+- Qdrant 查询响应本来就带 payload，缓存它可以避免为了取正文再发一次 retrieve
+  请求——只缓存 id 仍然需要第二次 Qdrant 调用，省不下来。
+
+**缓存键**包含稠密向量（float32 打包）、稀疏向量的 indices/values、集合名、
+`top_k`、两路预取数量、嵌入模型名、查询指令前缀、词表指纹与距离度量。
+任一不同都不会误命中。
+
+缓存实例挂在 `app.state.retrieval_cache`，由 Agent 的检索工具与固定检索路径共享；
+如果每个请求各建一个缓存，跨请求命中率会退化为 0。
+
+- LRU 上限 `RETRIEVAL_CACHE_MAXSIZE`（默认 128 条；每条约 `RETRIEVAL_TOP_K`
+  个候选点的 payload，内存很小）；
+- TTL `RETRIEVAL_CACHE_TTL`（默认 600 秒）。服务运行期间重新入库时，
+  旧候选最多存活一个 TTL；也可以重启进程立即清空；
+- `RETRIEVAL_CACHE_ENABLED=false` 或 maxsize=0 时完全旁路，行为与未接入缓存一致；
+- 空结果也会缓存（避免反复查询不存在的主题），同样受 TTL 约束；
+- 只缓存 Qdrant 候选，日志与 Langfuse 的 `retrieval` span 里会带 `cache_hit`，
+  精排仍按每次请求的真实问题执行。
+
 ## 分数怎么用
 
 - **RRF 分数**是排名融合的产物，量纲与余弦相似度不同，
@@ -85,3 +122,6 @@ stateDiagram-v2
 | `RERANK_ENABLED` | true | 关闭可省 1-2 秒/次 |
 | `RERANK_MIN_SCORE` | 0.0 | 0.0 表示不截断 |
 | `MAX_CONTEXT_CHARS` | 6000 | 上下文预算，超限时**整块丢弃**而非截断正文 |
+| `RETRIEVAL_CACHE_ENABLED` | true | 关闭后完全不读写候选缓存 |
+| `RETRIEVAL_CACHE_MAXSIZE` | 128 | LRU 条数；0 等同关闭 |
+| `RETRIEVAL_CACHE_TTL` | 600 | 秒；0 表示不按时间过期 |

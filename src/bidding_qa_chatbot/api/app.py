@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from bidding_qa_chatbot.config import Settings, get_settings, validate_runtime
 from bidding_qa_chatbot.log import redact, setup_logging
 from bidding_qa_chatbot.retrieval import bm25 as bm25_mod
+from bidding_qa_chatbot.retrieval.cache import RetrievalCache
 from bidding_qa_chatbot.retrieval.qdrant_store import build_client, collection_meta
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ def build_agent(
     *,
     graph: Any = None,
     web_search: Any = None,
+    retrieval_cache: RetrievalCache | None = None,
 ) -> Any:
     """构造 Agent（未启用时返回 None）。
 
@@ -103,6 +105,7 @@ def build_agent(
         settings,
         bm25_artifact=bm25_artifact,
         collection_vocab_sha1=collection_vocab_sha1,
+        cache=retrieval_cache,
     )
     agent = RagAgent(
         chain,
@@ -127,6 +130,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.http = build_http_client(settings)
     app.state.qdrant = build_client(settings)
+    # 进程内共享：Agent 的工具检索与固定检索路径必须命中同一份缓存，
+    # 否则每次请求新建 Retriever 会让缓存完全失效。
+    app.state.retrieval_cache = RetrievalCache(
+        maxsize=settings.retrieval_cache_maxsize if settings.retrieval_cache_enabled else 0,
+        ttl_seconds=settings.retrieval_cache_ttl,
+    )
+    if app.state.retrieval_cache.enabled:
+        logger.info(
+            "RAG 候选缓存已启用: maxsize=%d, ttl=%.0fs",
+            settings.retrieval_cache_maxsize,
+            settings.retrieval_cache_ttl,
+        )
+    else:
+        logger.info("RAG 候选缓存未启用")
 
     # ---- Langfuse 可观测性 ----
     # 未配置 KEY / 显式关闭 / SDK 初始化失败时返回 no-op，绝不影响问答。
@@ -257,6 +274,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.collection_vocab_sha1,
         graph=app.state.graph,
         web_search=app.state.web_search,
+        retrieval_cache=app.state.retrieval_cache,
     )
 
     app.state.settings = settings
@@ -265,6 +283,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        cache = getattr(app.state, "retrieval_cache", None)
+        if cache is not None:
+            logger.info("RAG 候选缓存统计: %s", cache.stats())
         # 停止 Langfuse 后台线程并 flush；失败不影响进程退出。
         observability = getattr(app.state, "observability", None)
         if observability is not None:

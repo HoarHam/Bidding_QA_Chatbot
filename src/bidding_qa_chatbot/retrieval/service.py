@@ -15,6 +15,7 @@ from qdrant_client import models as qm
 
 from bidding_qa_chatbot.config import Settings, get_settings
 from bidding_qa_chatbot.retrieval import bm25 as bm25_mod
+from bidding_qa_chatbot.retrieval.cache import RetrievalCache, build_cache_key
 from bidding_qa_chatbot.retrieval.qdrant_store import RetrievedPoint, hybrid_search
 from bidding_qa_chatbot.schemas import SourceImage, SourceRef
 
@@ -75,6 +76,8 @@ class RetrievalResult:
     elapsed_ms: int
     degraded: bool = False
     reason: str | None = None
+    #: 本次是否直接命中候选缓存（跳过 Qdrant query_points）。
+    cache_hit: bool = False
 
 
 class Retriever:
@@ -86,6 +89,7 @@ class Retriever:
         settings: Settings | None = None,
         bm25_artifact: bm25_mod.BM25Artifact | None = None,
         collection_vocab_sha1: str | None = None,
+        cache: RetrievalCache | None = None,
     ) -> None:
         self.client = qdrant_client
         self.encoder = encoder
@@ -93,6 +97,20 @@ class Retriever:
         self.settings = settings or get_settings()
         self.bm25 = bm25_artifact
         self.collection_vocab_sha1 = collection_vocab_sha1
+        # 应用层会注入一个与 Agent 共用的实例；测试/独立调用不注入时也能工作，
+        # 只是缓存只在这个 Retriever 实例内有效。
+        self.cache = (
+            cache
+            if cache is not None
+            else RetrievalCache(
+                maxsize=(
+                    self.settings.retrieval_cache_maxsize
+                    if self.settings.retrieval_cache_enabled
+                    else 0
+                ),
+                ttl_seconds=self.settings.retrieval_cache_ttl,
+            )
+        )
 
     @property
     def available(self) -> bool:
@@ -129,17 +147,46 @@ class Retriever:
 
         dense_vector = self.encoder.encode_query(query)
         sparse_vector = self._encode_sparse(query)
+        limit = top_k or self.settings.retrieval_top_k
 
-        points: list[RetrievedPoint] = await hybrid_search(
-            self.client, dense_vector, sparse_vector, self.settings, top_k=top_k
-        )
+        points: list[RetrievedPoint] | None = None
+        cache_hit = False
+        cache_key: str | None = None
+        if self.cache.enabled:
+            cache_key = build_cache_key(
+                dense_vector=dense_vector,
+                sparse_vector=sparse_vector,
+                collection=self.settings.qdrant_collection,
+                limit=limit,
+                prefetch_dense=self.settings.retrieval_prefetch_dense,
+                prefetch_sparse=self.settings.retrieval_prefetch_sparse,
+                embed_model=self.settings.embed_model_name,
+                query_instruction=self.settings.embed_query_instruction,
+                collection_vocab_sha1=self.collection_vocab_sha1,
+                distance=self.settings.qdrant_distance.lower(),
+            )
+            points = self.cache.get(cache_key)
+            if points is not None:
+                cache_hit = True
+                logger.debug("RAG 候选缓存命中（collection=%s）", self.settings.qdrant_collection)
+
+        if points is None:
+            points = await hybrid_search(
+                self.client, dense_vector, sparse_vector, self.settings, top_k=limit
+            )
+            if cache_key is not None:
+                self.cache.put(cache_key, points)
 
         degraded = sparse_vector is None
         reason = None if not degraded else self._sparse_available()[1]
 
         if not points:
             return RetrievalResult(
-                sources=[], elapsed_ms=_ms(started), degraded=degraded, reason=reason
+                sources=[],
+                elapsed_ms=_ms(started),
+                degraded=degraded,
+                reason=reason,
+                cache_hit=cache_hit,
             )
 
         sources = self._rerank(query, points, degraded=degraded, reason=reason)
@@ -148,6 +195,7 @@ class Retriever:
             elapsed_ms=_ms(started),
             degraded=degraded,
             reason=reason,
+            cache_hit=cache_hit,
         )
 
     def _rerank(
