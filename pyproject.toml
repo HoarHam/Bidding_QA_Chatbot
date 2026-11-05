@@ -66,6 +66,11 @@ dependencies = [
     # 5.x 是 OTel 重构后的当前线；锁 <6 避免 SDK 大版本 API 漂移。
     # 未配置 KEY 时 observability 不会导入它，禁用追踪不增加启动开销。
     "langfuse>=5.0.4,<6",
+    # --- 综合评测（Ragas）---
+    # ragas 0.4.3 在 import 时引用 langchain_community.chat_models.vertexai，
+    # 该模块在 langchain-community 0.4 已移除；不锁 <0.4 会在启动评测时 ImportError。
+    "ragas>=0.4.3,<0.5",
+    "langchain-community>=0.3.31,<0.4",
 ]
 
 [project.optional-dependencies]

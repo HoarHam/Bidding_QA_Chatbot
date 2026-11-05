@@ -22,6 +22,7 @@ flowchart LR
         ATT["附件层<br/>上传存储 · PDF/DOCX 提取"]
         LLM["LLM 层<br/>provider 链 + 回退"]
         OBS["可观测性<br/>Langfuse trace / score"]
+        EVAL["综合评测<br/>Ragas /evaluate"]
     end
 
     subgraph ext["外部依赖"]
@@ -62,6 +63,9 @@ flowchart LR
     LLM -.降级.-> VL
     API -.异步旁路（失败不影响问答）.-> LF
     AG -.Agent/工具 span.-> LF
+    EVAL -->|离线：复用 Agent 生成| AG
+    EVAL -->|Ragas 判分| ZP
+    EVAL -.在线评测读取 trace.-> LF
 ```
 
 ## 一次问答的时序

@@ -366,6 +366,65 @@ async def recent_user_attachments(
     return [row for row in rows if isinstance(row, list)]
 
 
+async def recent_qa_pairs_per_user(
+    session: AsyncSession, *, limit_per_user: int = 10
+) -> list[tuple[Message, Message, Conversation, User]]:
+    """每个用户最近 N 组带 Langfuse trace 的问答对。
+
+    在线评测要求 `trace_id` 非空；每条助手消息向前找同会话同序号的用户消息，
+    找不到的跳过。不同用户各自独立取最近 N 条，因此总用例数可能超过 N。
+    """
+    limit_per_user = max(1, limit_per_user)
+
+    user_stmt = (
+        sa.select(User)
+        .join(Conversation, Conversation.user_id == User.id)
+        .join(Message, Message.conversation_id == Conversation.id)
+        .where(
+            Message.role == "assistant",
+            Message.trace_id.is_not(None),
+            Message.content != "",
+        )
+        .distinct()
+    )
+    users = list((await session.execute(user_stmt)).scalars().all())
+
+    pairs: list[tuple[Message, Message, Conversation, User]] = []
+    for user in users:
+        rows = (
+            await session.execute(
+                sa.select(Message, Conversation)
+                .join(Conversation, Message.conversation_id == Conversation.id)
+                .where(
+                    Conversation.user_id == user.id,
+                    Message.role == "assistant",
+                    Message.trace_id.is_not(None),
+                    Message.content != "",
+                )
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(limit_per_user * 3)
+            )
+        ).all()
+        taken = 0
+        for assistant, conversation in rows:
+            previous = (
+                await session.execute(
+                    sa.select(Message).where(
+                        Message.conversation_id == conversation.id,
+                        Message.seq == assistant.seq - 1,
+                        Message.role == "user",
+                    )
+                )
+            ).scalar_one_or_none()
+            if previous is None:
+                continue
+            pairs.append((previous, assistant, conversation, user))
+            taken += 1
+            if taken >= limit_per_user:
+                break
+    return pairs
+
+
 # ------------------------------------------------------------------ 搜索
 async def search_messages(
     session: AsyncSession,

@@ -68,6 +68,9 @@ coverage.xml
 *.log
 logs/
 
+# Ragas 判分响应缓存（可重建，不入库）
+/.cache/
+
 # ---------- 数据库 / 本地存储 ----------
 *.sqlite3
 *.db

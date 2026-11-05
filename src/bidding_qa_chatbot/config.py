@@ -244,6 +244,22 @@ class Settings(BaseSettings):
     #: 单个正文文本字段上报到 Langfuse 的最大字符数，防止超长附件把请求撑爆。
     langfuse_max_content_chars: int = 12000
 
+    # ---------- 综合评测（Ragas） ----------
+    evaluate_enabled: bool = False
+    #: 判分模型必须与被测 provider 不同源，避免自评虚高。
+    evaluate_judge_provider: Literal["zhipu", "deepseek"] = "zhipu"
+    evaluate_judge_model: str = "glm-5.3-flash"
+    evaluate_judge_max_tokens: int = 8192
+    evaluate_judge_timeout: float = 180.0
+    #: 评测结果历史列表最多返回几条（只影响展示，不删文件）。
+    evaluate_history_limit: int = 20
+    #: 在线评测对**每个用户**最多取多少组最近的真实问答；总用例数为各用户之和。
+    evaluate_online_limit: int = 10
+    #: ragas 响应磁盘缓存目录；相对路径按项目根解析，空字符串关闭。
+    evaluate_ragas_cache_dir: str = ".cache/ragas"
+    evaluate_results_dir_name: str = "evaluations"
+    evaluate_cases_filename: str = "evaluate_cases.json"
+
     # ---------- 路径 ----------
     data_dir: Path = Field(default=ROOT_DIR / "data")
     extracted_dir_name: str = "extracted"
@@ -297,6 +313,26 @@ class Settings(BaseSettings):
             and self.langfuse_secret_key is not None
             and bool(self.langfuse_secret_key.get_secret_value().strip())
         )
+
+    @property
+    def evaluate_judge_configured(self) -> bool:
+        key = (
+            self.zhipu_api_key if self.evaluate_judge_provider == "zhipu" else self.deepseek_api_key
+        )
+        return key is not None and bool(key.get_secret_value().strip())
+
+    @property
+    def evaluate_cases_path(self) -> Path:
+        return self.data_dir / "processed" / self.evaluate_cases_filename
+
+    @property
+    def evaluations_dir(self) -> Path:
+        return self.data_dir / self.evaluate_results_dir_name
+
+    @property
+    def evaluate_ragas_cache_path(self) -> Path:
+        path = Path(self.evaluate_ragas_cache_dir)
+        return path if path.is_absolute() else ROOT_DIR / path
 
     @property
     def extracted_dir(self) -> Path:
@@ -385,4 +421,9 @@ def validate_runtime(settings: Settings) -> list[str]:
             problems.append("ENABLE_WEB_SEARCH=true 但 TAVILY_API_KEY 未配置（关键词联网不可用）")
         if settings.exa_api_key is None:
             problems.append("ENABLE_WEB_SEARCH=true 但 EXA_API_KEY 未配置（语义联网不可用）")
+    if settings.evaluate_enabled and not settings.evaluate_judge_configured:
+        problems.append(
+            f"EVALUATE_ENABLED=true 但判分模型 {settings.evaluate_judge_provider} 的密钥未配置"
+            "（Ragas 评测不可用）"
+        )
     return problems

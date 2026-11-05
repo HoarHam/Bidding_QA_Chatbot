@@ -65,6 +65,9 @@ class ToolResultNotice:
     #: 联网搜索来源（与本地知识库 sources 分开走，前端分区渲染）
     web_sources: list[dict[str, Any]] = field(default_factory=list)
     degraded: bool = False
+    #: 回灌给模型的工具结果正文。前端/SSE 不使用；评测需要它作为 Ragas 的
+    #: retrieved_contexts（图谱表格、知识库全文、联网摘要都在这里）。
+    content: str = ""
 
 
 @dataclass(slots=True)
@@ -360,6 +363,7 @@ class RagAgent:
                     sources=list(result.artifacts.get("sources") or []),
                     web_sources=list(result.artifacts.get("web_sources") or []),
                     degraded=bool(result.artifacts.get("degraded")),
+                    content=result.content,
                 )
 
                 messages.append(

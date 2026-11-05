@@ -266,6 +266,9 @@ class NoopObservability:
     def score_feedback(self, *, trace_id: str | None, message_id: str, rating: str | None) -> None:
         return None
 
+    def fetch_trace_observations(self, trace_id: str, *, limit: int = 200) -> list[dict]:
+        return []
+
     def flush(self) -> None:
         return None
 
@@ -397,6 +400,33 @@ class LangfuseObservability:
             )
         except Exception as exc:  # noqa: BLE001
             self._reporter.report("create_score", exc)
+
+    def fetch_trace_observations(self, trace_id: str, *, limit: int = 200) -> list[dict]:
+        """读取一条 trace 的全部 observation，供在线评测使用。
+
+        这是同步 HTTP 调用（Langfuse 的 API 客户端是同步的），调用方应放到
+        `asyncio.to_thread` 里，避免阻塞事件循环。失败时返回空列表，由评测层
+        决定是重试还是记为用例失败。
+        """
+        if not trace_id or self._client is None:
+            return []
+        try:
+            response = self._client.api.observations.get_many(
+                trace_id=trace_id,
+                limit=limit,
+                # 默认只返回 core+basic，input/output/metadata 会是 None。
+                # 在线评测需要工具输出正文，必须显式请求 io/metadata。
+                fields="core,basic,time,io,metadata,model,usage,trace_context",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._reporter.report("fetch_trace_observations", exc)
+            return []
+        observations = getattr(response, "data", None) or []
+        result: list[dict] = []
+        for observation in observations:
+            if hasattr(observation, "model_dump"):
+                result.append(observation.model_dump(mode="json"))
+        return result
 
     def flush(self) -> None:
         try:

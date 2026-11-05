@@ -11,6 +11,13 @@
 | POST | `/api/chat` | 一次性 JSON 回答 |
 | POST | `/api/attachments` | 上传附件（multipart；只存储，发送时才 OCR） |
 | POST | `/api/messages/{message_id}/feedback` | 记录/清除助手消息反馈（`up`/`down`/`null`） |
+| GET | `/evaluate` | Ragas 综合评测 HTML 面板（8001 端口） |
+| GET | `/api/evaluate/config` | 评测配置、判分模型、数据集与可用性 |
+| POST | `/api/evaluate/offline` | 启动离线数据集评测（后台任务，返回 run_id） |
+| POST | `/api/evaluate/online` | 启动全部用户最近对话的在线评测 |
+| GET | `/api/evaluate/runs` | 评测历史摘要列表（支持 `?username=`） |
+| GET | `/api/evaluate/users` | 历史中出现过的用户及用例数 |
+| GET | `/api/evaluate/runs/{run_id}` | 单次评测完整结果与用例明细（支持 `?username=`） |
 | POST | `/api/retrieve` | **只检索不生成**，便于单独排查检索质量、不消耗 LLM 额度 |
 | GET | `/api/sources/{chunk_id}` | 分块完整记录 |
 | GET | `/api/sources/{chunk_id}/images/{index}` | 分块内嵌图片（PNG） |
@@ -47,6 +54,15 @@
 - `done` 事件现在带 `message_id`（落库失败时为 `null`），前端据此挂载反馈/重新生成。
 - `done.timings` 与历史 `MessageOut.timings` 返回同一份分阶段用时：
   `{total_ms, thinking_ms, tool_ms, generation_ms}`（毫秒，均可为 0）。
+
+### 综合评测（Ragas）
+
+`/evaluate` 是后端直接托管的 HTML 面板，**不需要登录**；`/api/evaluate/*` 同样公开。
+`POST /api/evaluate/offline` 与 `/online` 都是后台任务，立即返回
+`{id, mode, status, progress, ...}`，之后用 `GET /api/evaluate/runs/{id}` 轮询。
+在线评测对每个用户取最近 10 条带 Langfuse trace 的问答；`GET /api/evaluate/runs` 与
+详情接口支持 `?username=` 按用户筛选（详情会只返回该用户用例并重算指标）。
+同一时间只允许一个评测任务（409）。指标与限制详见 `docs/evaluation.md`。
 
 `mode` 取 `fast` 或 `thinking`。`web_search` 为用户端「联网搜索」开关：
 只有当服务端 `ENABLE_WEB_SEARCH=true` 且本请求为 `true` 时，模型才会看到联网工具；

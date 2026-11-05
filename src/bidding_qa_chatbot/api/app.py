@@ -277,6 +277,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         retrieval_cache=app.state.retrieval_cache,
     )
 
+    # ---- 综合评测（Ragas）：离线数据集 + 在线历史对话 ----
+    from bidding_qa_chatbot.evaluation import EvaluationService
+
+    app.state.evaluation = EvaluationService(
+        settings,
+        agent=app.state.agent,
+        db=app.state.db,
+        encoder=app.state.encoder,
+        observability=app.state.observability,
+    )
+    if settings.evaluate_enabled:
+        if app.state.evaluation.enabled:
+            logger.info(
+                "评测已启用：判分 %s/%s，数据集 %s",
+                settings.evaluate_judge_provider,
+                settings.evaluate_judge_model,
+                settings.evaluate_cases_path,
+            )
+            if app.state.evaluation.judge_same_source:
+                logger.warning(
+                    "评测判分 provider 与被测 provider 相同（%s）：判分可能系统性虚高",
+                    settings.evaluate_judge_provider,
+                )
+        else:
+            logger.warning("EVALUATE_ENABLED=true 但评测不可用: %s", app.state.evaluation.reason)
+
     app.state.settings = settings
 
     logger.info("服务就绪：provider 链 %s", " -> ".join(settings.fallback_chain))
@@ -286,6 +312,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cache = getattr(app.state, "retrieval_cache", None)
         if cache is not None:
             logger.info("RAG 候选缓存统计: %s", cache.stats())
+        evaluation = getattr(app.state, "evaluation", None)
+        if evaluation is not None:
+            with contextlib.suppress(Exception):
+                await evaluation.aclose()
         # 停止 Langfuse 后台线程并 flush；失败不影响进程退出。
         observability = getattr(app.state, "observability", None)
         if observability is not None:
@@ -333,6 +363,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from bidding_qa_chatbot.api.routes_auth import router as auth_router
     from bidding_qa_chatbot.api.routes_chat import router as chat_router
     from bidding_qa_chatbot.api.routes_conversations import router as conversations_router
+    from bidding_qa_chatbot.api.routes_evaluate import router as evaluate_router
     from bidding_qa_chatbot.api.routes_health import router as health_router
     from bidding_qa_chatbot.api.routes_messages import router as messages_router
     from bidding_qa_chatbot.api.routes_sources import router as sources_router
@@ -343,6 +374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sources_router)
     app.include_router(attachments_router)
     app.include_router(messages_router)
+    app.include_router(evaluate_router)
     app.include_router(chat_router)
     return app
 

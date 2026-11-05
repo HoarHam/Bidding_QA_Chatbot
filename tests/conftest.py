@@ -103,6 +103,20 @@ _ENV_KEYS = (
     "LANGFUSE_TRACING_ENVIRONMENT",
     "LANGFUSE_DEBUG",
     "OTEL_SDK_DISABLED",
+    # 综合评测：.env 里 EVALUATE_ENABLED=true 且配置了判分模型；测试必须使用
+    # 显式关闭的假配置，绝不能真的去调用 Ragas/智谱。
+    "EVALUATE_ENABLED",
+    "EVALUATE_JUDGE_PROVIDER",
+    "EVALUATE_JUDGE_MODEL",
+    "EVALUATE_JUDGE_MAX_TOKENS",
+    "EVALUATE_JUDGE_TIMEOUT",
+    "EVALUATE_HISTORY_LIMIT",
+    "EVALUATE_ONLINE_LIMIT",
+    "EVALUATE_RAGAS_CACHE_DIR",
+    "EVALUATE_RESULTS_DIR_NAME",
+    "EVALUATE_CASES_FILENAME",
+    "RAGAS_DO_NOT_TRACK",
+    "ZHIPU_BASE_URL",
 )
 
 
@@ -214,6 +228,7 @@ async def api_client(db, auth_settings):
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        client.app = app  # type: ignore[attr-defined] — 测试里直接注入/检查 app.state
         yield client
 
 

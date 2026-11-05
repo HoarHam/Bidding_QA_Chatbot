@@ -25,6 +25,12 @@ GLM-OCR 解析（PDF 逐页渲染、DOCX 提取正文与内嵌图片），解析
 重复提问跳过 `query_points`，精排仍按当前问题重算。缓存由 Agent 与固定检索路径共享，
 配置见 `RETRIEVAL_CACHE_*`。
 
+**综合评测（Ragas）**：后端在 8001 端口提供无需登录的 `/evaluate` 面板，支持离线
+`evaluate_cases.json` 数据集评测，以及每个用户最近 10 条带 Langfuse trace 的在线评测。
+在线模式由判分模型基于 Langfuse 工具记录判断工具选择并生成参考答案，指标包括工具选择
+准确率、忠诚度、相关性、召回率与平均延迟；页面支持按用户筛选。结果写入
+`data/evaluations/`。详见 `docs/evaluation.md`。
+
 **可观测性（Langfuse）**：每一轮问答都会生成一条 trace，覆盖 Agent 的每一步、
 每次 LLM 生成与每次工具调用；👍/👎 会作为 score 写回产生该回答的 trace。
 未配置密钥或 Langfuse 不可用时静默降级，不影响问答；可通过
@@ -163,7 +169,7 @@ flowchart LR
 | 附件解析 | 本地 Ollama `glm-ocr:latest`（原生 `/api/generate`）；PDF 用 PyMuPDF 渲染、DOCX 用 python-docx |
 | 文档渲染 | react-markdown + remark-gfm（含 GFM 表格） |
 
-更详细的说明见 `docs/`：架构、入库、检索、API、前端、开发、部署、可观测性。
+更详细的说明见 `docs/`：架构、入库、检索、API、前端、开发、部署、可观测性、综合评测。
 
 ## 协作者
 
